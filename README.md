@@ -19,10 +19,23 @@ curl -fsSL https://raw.githubusercontent.com/alvarofernandosm/BridgeEditor/main/
 | ---------- | ------------------------------------------ |
 | Linux | `bridge-editor_<v>_amd64.deb` · `BridgeEditor-<v>.AppImage` |
 | Windows | `BridgeEditor Setup <v>.exe` (instalador) · `BridgeEditor <v>.exe` (portable) |
-| macOS | `BridgeEditor-<v>.dmg` (sin firmar: clic derecho → Abrir la primera vez) |
+| macOS | `BridgeEditor-<v>-arm64.dmg` (ver nota abajo) |
 
-> Requisito en todas las plataformas: tener `claude` y/o `opencode` instalados y
-> autenticados para usar los agentes (el shell y el visor funcionan sin nada).
+**macOS**: la app no está firmada/notarizada por Apple (eso requiere la
+membresía de pago de Apple Developer), así que Gatekeeper muestra
+*"BridgeEditor is damaged and can't be opened"*. No está dañada — es la
+cuarentena de las descargas. Solución:
+
+```bash
+# arrastra BridgeEditor.app a /Applications desde el dmg y luego:
+xattr -cr /Applications/BridgeEditor.app
+```
+
+A partir de ahí abre normal.
+
+> Requisito en todas las plataformas: tener `claude`, `opencode` y/o `agy`
+> instalados y autenticados para usar los agentes (el shell y el visor
+> funcionan sin nada).
 
 Los releases se generan automáticamente con GitHub Actions al empujar un tag
 `v*` (`git tag v0.2.0 && git push --tags`).
