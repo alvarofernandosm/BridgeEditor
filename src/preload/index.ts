@@ -45,6 +45,29 @@ const api = {
   /** Sincroniza el estado de las celdas hacia el main (puente de delegación). */
   syncCells: (cells: unknown[]): void => ipcRenderer.send('cells:sync', cells),
 
+  /** Delegación aprobada por clic desde la UI (marcadores @delegate). */
+  delegateFromCell: (opts: {
+    target: string | number
+    message: string
+    fromCellId: string
+  }): Promise<{ ok?: boolean; cell?: number; text?: string; error?: string | null }> =>
+    ipcRenderer.invoke('bridge:delegate', opts),
+
+  /** El main pide abrir una celda (POST /open-cell del puente). */
+  onOpenCellRequest: (
+    cb: (spec: { requestId: string; agent: 'claude' | 'opencode'; model: string | null; cwd: string }) => void
+  ): (() => void) => {
+    const listener = (
+      _event: unknown,
+      spec: { requestId: string; agent: 'claude' | 'opencode'; model: string | null; cwd: string }
+    ): void => cb(spec)
+    ipcRenderer.on('cells:open-request', listener)
+    return () => ipcRenderer.removeListener('cells:open-request', listener)
+  },
+
+  openCellResponse: (requestId: string, cellId: string | null): void =>
+    ipcRenderer.send('cells:open-response', { requestId, cellId }),
+
   createPty: (opts: {
     id: string
     cellId?: string

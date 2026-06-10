@@ -68,37 +68,50 @@ interface SavedCell {
   cwd: string
 }
 
-// Restaura el layout de la sesión anterior: las celdas de archivo se reabren
-// y las de agente relanzan su comando en el mismo directorio.
+// Convierte celdas guardadas (layout persistido o plantilla) en CellState.
+// withSessions=true retoma sesiones (--resume); false arranca limpio (plantillas).
+function cellsFromSaved(saved: SavedCell[], withSessions: boolean): CellState[] {
+  return saved.slice(0, MAX_CELLS).map((s) => {
+    const agent = AGENT_KINDS.includes(s.agent as AgentKind) ? (s.agent as AgentKind) : null
+    const file = typeof s.file === 'string' ? s.file : null
+    return {
+      id: `cell-${nextId++}`,
+      agent,
+      mode: s.mode === 'chat' && agent !== 'shell' ? 'chat' : 'term',
+      perm: s.perm === 'flexible' || s.perm === 'yolo' ? s.perm : 'default',
+      resume: withSessions && agent !== null && agent !== 'shell' && s.mode !== 'chat',
+      termSessionId: withSessions && typeof s.termSessionId === 'string' ? s.termSessionId : null,
+      chatSessionId: withSessions && typeof s.chatSessionId === 'string' ? s.chatSessionId : null,
+      chatModel: typeof s.chatModel === 'string' ? s.chatModel : null,
+      file,
+      cwd: typeof s.cwd === 'string' ? s.cwd : '',
+      status: file ? 'file' : agent ? 'running' : 'launcher',
+      generation: 0,
+      activity: 'idle',
+      attention: false
+    } satisfies CellState
+  })
+}
+
 function loadSavedLayout(): CellState[] | null {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return null
     const saved = JSON.parse(raw) as SavedCell[]
     if (!Array.isArray(saved) || saved.length === 0) return null
-    return saved.slice(0, MAX_CELLS).map((s) => {
-      const agent = AGENT_KINDS.includes(s.agent as AgentKind) ? (s.agent as AgentKind) : null
-      const file = typeof s.file === 'string' ? s.file : null
-      return {
-        id: `cell-${nextId++}`,
-        agent,
-        mode: s.mode === 'chat' && agent !== 'shell' ? 'chat' : 'term',
-        perm: s.perm === 'flexible' || s.perm === 'yolo' ? s.perm : 'default',
-        // las terminales de claude restauradas retoman SU conversación (--resume id)
-        resume: agent !== null && agent !== 'shell' && s.mode !== 'chat',
-        termSessionId: typeof s.termSessionId === 'string' ? s.termSessionId : null,
-        chatSessionId: typeof s.chatSessionId === 'string' ? s.chatSessionId : null,
-        chatModel: typeof s.chatModel === 'string' ? s.chatModel : null,
-        file,
-        cwd: typeof s.cwd === 'string' ? s.cwd : '',
-        status: file ? 'file' : agent ? 'running' : 'launcher',
-        generation: 0,
-        activity: 'idle',
-        attention: false
-      } satisfies CellState
-    })
+    return cellsFromSaved(saved, true)
   } catch {
     return null
+  }
+}
+
+const TEMPLATES_KEY = 'bridge-editor.templates.v1'
+
+function loadTemplates(): Record<string, SavedCell[]> {
+  try {
+    return JSON.parse(localStorage.getItem(TEMPLATES_KEY) ?? '{}')
+  } catch {
+    return {}
   }
 }
 
@@ -115,6 +128,9 @@ export default function App(): JSX.Element {
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [home, setHome] = useState('')
   const [version, setVersion] = useState('')
+  const [templates, setTemplates] = useState<Record<string, SavedCell[]>>(loadTemplates)
+  const [namingTemplate, setNamingTemplate] = useState(false)
+  const [templateName, setTemplateName] = useState('')
 
   useEffect(() => {
     window.bridge.homeDir().then(setHome)
@@ -145,10 +161,32 @@ export default function App(): JSX.Element {
         perm: c.perm,
         chatSessionId: c.chatSessionId,
         chatModel: c.chatModel,
+        termSessionId: c.termSessionId,
         busy: c.activity === 'working'
       }))
     )
   }, [cells])
+
+  // El puente puede pedir abrir una celda nueva (POST /open-cell).
+  useEffect(() => {
+    return window.bridge.onOpenCellRequest((spec) => {
+      let createdId: string | null = null
+      setCells((cs) => {
+        if (cs.length >= MAX_CELLS) return cs
+        const cell: CellState = {
+          ...newCell(),
+          agent: spec.agent,
+          mode: 'chat',
+          cwd: spec.cwd,
+          chatModel: spec.model,
+          status: 'running'
+        }
+        createdId = cell.id
+        return [...cs, cell]
+      })
+      window.bridge.openCellResponse(spec.requestId, createdId)
+    })
+  }, [])
 
   useEffect(() => {
     const snapshot: SavedCell[] = cells.map((c) => ({
@@ -205,6 +243,40 @@ export default function App(): JSX.Element {
         ? cs
         : [...cs, { ...newCell(), agent: kind, cwd, mode, status: 'running' as const }]
     )
+  }, [])
+
+  // Plantillas de layout: snapshots nombrados (sin sesiones — arrancan limpias).
+  const saveTemplate = useCallback(
+    (name: string) => {
+      const snapshot: SavedCell[] = cells.map((c) => ({
+        agent: c.agent,
+        mode: c.mode,
+        perm: c.perm,
+        chatModel: c.chatModel,
+        file: c.file,
+        cwd: c.cwd
+      }))
+      setTemplates((ts) => {
+        const next = { ...ts, [name]: snapshot }
+        localStorage.setItem(TEMPLATES_KEY, JSON.stringify(next))
+        return next
+      })
+    },
+    [cells]
+  )
+
+  const applyTemplate = useCallback((saved: SavedCell[]) => {
+    setCells(cellsFromSaved(saved, false))
+    setActiveId(null)
+  }, [])
+
+  const deleteTemplate = useCallback((name: string) => {
+    setTemplates((ts) => {
+      const next = { ...ts }
+      delete next[name]
+      localStorage.setItem(TEMPLATES_KEY, JSON.stringify(next))
+      return next
+    })
   }, [])
 
   // Drag & drop de headers: intercambia la posición de dos celdas.
@@ -342,6 +414,27 @@ export default function App(): JSX.Element {
       run: () => activateCell(c.id)
     })
   })
+  paletteCommands.push({
+    id: 'template-save',
+    label: '💾 Guardar layout como plantilla…',
+    run: () => {
+      setTemplateName('')
+      setNamingTemplate(true)
+    }
+  })
+  Object.entries(templates).forEach(([name, saved]) => {
+    paletteCommands.push({
+      id: `template-load-${name}`,
+      label: `📐 Cargar plantilla: ${name}`,
+      hint: `${saved.length} celdas`,
+      run: () => applyTemplate(saved)
+    })
+    paletteCommands.push({
+      id: `template-del-${name}`,
+      label: `🗑 Eliminar plantilla: ${name}`,
+      run: () => deleteTemplate(name)
+    })
+  })
 
   return (
     <div className="app">
@@ -374,6 +467,31 @@ export default function App(): JSX.Element {
         onSwap={swapCells}
       />
       {paletteOpen && <Palette commands={paletteCommands} onClose={() => setPaletteOpen(false)} />}
+      {namingTemplate && (
+        <div
+          className="palette-overlay"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setNamingTemplate(false)
+          }}
+        >
+          <div className="palette">
+            <input
+              autoFocus
+              value={templateName}
+              placeholder="Nombre de la plantilla (Enter guarda, Esc cancela)"
+              spellCheck={false}
+              onChange={(e) => setTemplateName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') setNamingTemplate(false)
+                else if (e.key === 'Enter' && templateName.trim()) {
+                  saveTemplate(templateName.trim())
+                  setNamingTemplate(false)
+                }
+              }}
+            />
+          </div>
+        </div>
+      )}
     </div>
   )
 }

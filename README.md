@@ -166,6 +166,30 @@ Pruébalo: abre un chat de Claude en la celda 1 y chats de OpenCode en la 2 y
 la 3, y dile a Claude: *"lista las celdas disponibles y delega X a la celda 2
 y Y a la 3, luego intégrame los resultados"*.
 
+Además del `/delegate` básico, el puente ofrece:
+
+- **`POST /open-cell`** — el orquestador abre una celda nueva con el agente y
+  modelo que necesite (con tu permiso) y le asigna su primera tarea: arma su
+  propio equipo sobre la marcha.
+- **`GET /activity`** — feed de lo ocurrido en las demás celdas (archivos
+  guardados, turnos de chat, delegaciones), para que un agente se ponga en
+  contexto por demanda.
+- **Consulta a terminales de Claude** — delegar a una celda TUI de Claude con
+  sesión rastreada ejecuta un *fork headless de su conversación*: responde con
+  todo su contexto sin tocar el TUI (`delegationType: "consult"` en /cells).
+- **Marcadores `@delegate`** — en una celda de chat, el agente puede escribir
+  `@delegate(2, "tarea")` en su respuesta: aparece una tarjeta con botón
+  **▶ Delegar** (tu clic es el permiso) y el resultado vuelve al orquestador
+  como turno nuevo.
+
+## Plantillas de layout
+
+Desde la paleta (`Ctrl+Shift+P`): **💾 Guardar layout como plantilla…** captura
+la configuración actual (agentes, modos, modelos, permisos, directorios — sin
+sesiones), y **📐 Cargar plantilla** la aplica al instante. Ideal para cambiar
+entre setups de trabajo (full-stack, review, investigación) sin armar la
+grilla a mano.
+
 ## Visor de archivos
 
 Una celda también puede abrir un archivo (**📄 Abrir archivo** en el launcher):

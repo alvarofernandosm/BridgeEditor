@@ -3,10 +3,17 @@ import { renderMarkdown } from './highlight'
 import type { AgentKind } from './App'
 
 interface ChatMsg {
-  role: 'user' | 'remote-user' | 'assistant' | 'thinking' | 'tool' | 'meta' | 'error'
+  role: 'user' | 'remote-user' | 'assistant' | 'thinking' | 'tool' | 'meta' | 'error' | 'proposal'
   text: string
   name?: string
+  /** Para 'proposal': celda destino del @delegate. */
+  target?: string
+  /** Para 'proposal': pending | sent | dismissed */
+  state?: 'pending' | 'sent' | 'dismissed'
 }
+
+/** @delegate(2, "tarea") emitido por el agente en su respuesta. */
+const DELEGATE_RE = /@delegate\(\s*([\w-]+)\s*,\s*"([^"]{3,500})"\s*\)/g
 
 type ChatPerm = 'plan' | 'edits' | 'flexible' | 'full'
 
@@ -90,9 +97,19 @@ export function ChatView({
           setRunning(true)
           onActivity('working')
           break
-        case 'text':
-          setMessages((ms) => [...ms, { role: 'assistant', text: ev.text }])
+        case 'text': {
+          setMessages((ms) => {
+            const next: ChatMsg[] = [...ms, { role: 'assistant', text: ev.text }]
+            // marcadores @delegate del agente → tarjetas de propuesta
+            DELEGATE_RE.lastIndex = 0
+            let m: RegExpExecArray | null
+            while ((m = DELEGATE_RE.exec(ev.text))) {
+              next.push({ role: 'proposal', target: m[1], text: m[2], state: 'pending' })
+            }
+            return next
+          })
           break
+        }
         case 'thinking':
           setMessages((ms) => [...ms, { role: 'thinking', text: ev.text }])
           break
@@ -204,11 +221,29 @@ export function ChatView({
     return false
   }
 
-  const send = (): void => {
-    const message = input.trim()
+  // Ejecutar una propuesta @delegate: delegar y devolver el resultado al
+  // orquestador como un turno nuevo automático.
+  const runProposal = async (index: number): Promise<void> => {
+    const proposal = messages[index]
+    if (!proposal || proposal.role !== 'proposal' || proposal.state !== 'pending') return
+    setMessages((ms) => ms.map((m, i) => (i === index ? { ...m, state: 'sent' as const } : m)))
+    addMeta(`delegando a la celda ${proposal.target}…`)
+    const res = await window.bridge.delegateFromCell({
+      target: /^\d+$/.test(proposal.target!) ? Number(proposal.target) : proposal.target!,
+      message: proposal.text,
+      fromCellId: cellId
+    })
+    if (res.error || !res.ok) {
+      setMessages((ms) => [...ms, { role: 'error', text: `delegación falló: ${res.error}` }])
+      return
+    }
+    sendText(
+      `[Resultado de la delegación a la celda ${res.cell}]\n\n${res.text || '(sin texto)'}`
+    )
+  }
+
+  const sendText = (message: string): void => {
     if (!message || running) return
-    setInput('')
-    if (message.startsWith('/') && handleSlash(message)) return
     setMessages((ms) => [...ms, { role: 'user', text: message }])
     setRunning(true)
     onActivity('working')
@@ -227,6 +262,14 @@ export function ChatView({
         onActivity('idle')
         setMessages((ms) => [...ms, { role: 'error', text: String(e) }])
       })
+  }
+
+  const send = (): void => {
+    const message = input.trim()
+    if (!message || running) return
+    setInput('')
+    if (message.startsWith('/') && handleSlash(message)) return
+    sendText(message)
   }
 
   return (
@@ -262,6 +305,36 @@ export function ChatView({
                 className="chat-assistant md-body"
                 dangerouslySetInnerHTML={{ __html: renderMarkdown(m.text) }}
               />
+            )
+          }
+          if (m.role === 'proposal') {
+            return (
+              <div key={i} className="chat-proposal">
+                <span className="chat-proposal-head">
+                  🤝 El agente propone delegar a la celda {m.target}
+                </span>
+                <code>{m.text}</code>
+                {m.state === 'pending' ? (
+                  <div className="chat-proposal-actions">
+                    <button className="chat-proposal-go" onClick={() => runProposal(i)}>
+                      ▶ Delegar
+                    </button>
+                    <button
+                      onClick={() =>
+                        setMessages((ms) =>
+                          ms.map((msg, j) => (j === i ? { ...msg, state: 'dismissed' as const } : msg))
+                        )
+                      }
+                    >
+                      ✕ Ignorar
+                    </button>
+                  </div>
+                ) : (
+                  <span className="chat-proposal-state">
+                    {m.state === 'sent' ? '✓ delegada' : 'ignorada'}
+                  </span>
+                )}
+              </div>
             )
           }
           if (m.role === 'thinking') {

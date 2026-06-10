@@ -4,7 +4,7 @@ import { readdir, stat, open } from 'fs/promises'
 import { join } from 'path'
 import { homedir } from 'os'
 import { claudeFlexibleSettingsPath } from './permissions'
-import { bridgeEnv } from './bridge-state'
+import { bridgeEnv, recordActivity } from './bridge-state'
 
 // Corre Claude Code / OpenCode en modo headless (un proceso por turno) y
 // normaliza su salida a eventos simples para la vista de chat.
@@ -314,6 +314,11 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
 export function registerChatHandlers(): void {
   ipcMain.handle('chat:send', (event, opts: ChatSendOpts) => {
     const wc: WebContents = event.sender
+    recordActivity({
+      cellId: opts.id,
+      kind: 'chat-turn',
+      detail: opts.message.replace(/\s+/g, ' ').slice(0, 120)
+    })
     return executeChatTurn(opts, (payload) => {
       if (!wc.isDestroyed()) wc.send(`chat:event:${opts.id}`, payload)
     }).then(() => undefined)

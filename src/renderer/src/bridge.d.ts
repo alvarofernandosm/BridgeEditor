@@ -33,6 +33,20 @@ declare global {
       chatSessions(cwd: string): Promise<Array<{ id: string; mtimeMs: number; summary: string }>>
       onChatEvent(id: string, cb: (ev: ChatEvent) => void): () => void
       syncCells(cells: unknown[]): void
+      delegateFromCell(opts: {
+        target: string | number
+        message: string
+        fromCellId: string
+      }): Promise<{ ok?: boolean; cell?: number; text?: string; error?: string | null }>
+      onOpenCellRequest(
+        cb: (spec: {
+          requestId: string
+          agent: 'claude' | 'opencode'
+          model: string | null
+          cwd: string
+        }) => void
+      ): () => void
+      openCellResponse(requestId: string, cellId: string | null): void
       createPty(opts: {
         id: string
         cellId?: string

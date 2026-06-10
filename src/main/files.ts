@@ -1,4 +1,5 @@
 import { ipcMain, dialog } from 'electron'
+import { recordActivity } from './bridge-state'
 import { readFile, writeFile, stat } from 'fs/promises'
 import { watchFile, unwatchFile, type Stats } from 'fs'
 import { isAbsolute, join, resolve } from 'path'
@@ -33,6 +34,7 @@ export function registerFileHandlers(): void {
 
   ipcMain.handle('file:write', async (_event, { path, content }: { path: string; content: string }) => {
     await writeFile(path, content, 'utf8')
+    recordActivity({ cellId: null, kind: 'file-saved', detail: path })
   })
 
   // Resuelve una ruta candidata (relativa al cwd de la celda, ~ expandido) y
