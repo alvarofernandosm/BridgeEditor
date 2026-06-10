@@ -1,0 +1,38 @@
+name: Release
+
+# Compila los instaladores de las 3 plataformas y los publica como
+# GitHub Release cada vez que se empuja un tag v* (ej: git tag v0.1.0).
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Instalar dependencias (compila node-pty para esta plataforma)
+        run: npm ci
+
+      - name: Compilar la app
+        run: npm run build
+
+      - name: Empaquetar y publicar en el Release
+        run: npx electron-builder --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # sin certificado de firma de Apple: empaquetar sin firmar
+          CSC_IDENTITY_AUTO_DISCOVERY: false

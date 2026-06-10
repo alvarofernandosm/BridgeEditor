@@ -4,6 +4,28 @@ IDE agéntico minimalista: una grilla dinámica de hasta 6 terminales (3×2) don
 celda corre **Claude Code**, **OpenCode** o un shell libre. Pensado para supervisar
 varios agentes trabajando en paralelo sobre repos o worktrees distintos.
 
+## Instalación
+
+**Linux (one-liner):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/alvarofernandosm/BridgeEditor/main/install.sh | bash
+```
+
+**Descargas directas** — en [Releases](https://github.com/alvarofernandosm/BridgeEditor/releases/latest):
+
+| Plataforma | Archivo |
+| ---------- | ------------------------------------------ |
+| Linux | `bridge-editor_<v>_amd64.deb` · `BridgeEditor-<v>.AppImage` |
+| Windows | `BridgeEditor Setup <v>.exe` (instalador) · `BridgeEditor <v>.exe` (portable) |
+| macOS | `BridgeEditor-<v>.dmg` (sin firmar: clic derecho → Abrir la primera vez) |
+
+> Requisito en todas las plataformas: tener `claude` y/o `opencode` instalados y
+> autenticados para usar los agentes (el shell y el visor funcionan sin nada).
+
+Los releases se generan automáticamente con GitHub Actions al empujar un tag
+`v*` (`git tag v0.2.0 && git push --tags`).
+
 ## Cómo funciona la grilla
 
 Arranca con 1 celda. Con **+ Nueva celda** la grilla se divide sola:

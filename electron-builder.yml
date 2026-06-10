@@ -28,6 +28,12 @@ win:
   executableName: BridgeEditor
   target:
     - nsis
+    - portable
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
+publish:
+  provider: github
+  owner: alvarofernandosm
+  repo: BridgeEditor
+  releaseType: release

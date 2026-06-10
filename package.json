@@ -5,6 +5,10 @@
   "main": "./out/main/index.js",
   "author": "Alvaro <alvaro@moadw.com>",
   "homepage": "https://github.com/alvarofernandosm/BridgeEditor",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alvarofernandosm/BridgeEditor.git"
+  },
   "license": "MIT",
   "scripts": {
     "dev": "node scripts/dev.mjs",
