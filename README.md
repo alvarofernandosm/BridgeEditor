@@ -41,11 +41,14 @@ Arranca con 1 celda. Con **+ Nueva celda** la grilla se divide sola:
 
 Al cerrar una celda la grilla se reacomoda. `Ctrl/Cmd+1…6` salta entre celdas.
 El layout se guarda solo: al reabrir la app, las celdas de archivo se reabren y
-las de agente relanzan su comando en el mismo directorio **con `--continue`**,
-así Claude Code y OpenCode retoman la conversación donde quedó (los chats hacen
-lo propio vía `--resume` con su session id). Nota: `--continue` retoma la
-conversación *más reciente del directorio* — si dos celdas comparten carpeta,
-ambas retomarían la misma.
+las de agente relanzan su comando en el mismo directorio. Para Claude Code,
+BridgeEditor detecta el **session id propio de cada celda** (vigilando qué
+sesión nueva aparece en `~/.claude/projects/` al lanzarla) y al restaurar usa
+`--resume <id>` exacto: cada celda retoma *su* conversación, sin mezclarse
+aunque compartan directorio. Si una celda no alcanzó a tener sesión, arranca
+limpia. Los chats hacen lo propio con su session id del modo headless. Las
+terminales de OpenCode restauran sesión nueva (su TUI tiene selector de
+sesiones interno para retomar).
 
 ## Supervisión de agentes
 

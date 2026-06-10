@@ -43,10 +43,18 @@ const api = {
     cwd: string
     command: string | null
     perm?: 'default' | 'flexible' | 'yolo'
-    resume?: boolean
+    resumeSession?: string | null
     cols: number
     rows: number
   }): Promise<string> => ipcRenderer.invoke('pty:create', opts),
+
+  /** Notifica el session id de claude detectado para una celda de terminal. */
+  onPtySession: (id: string, cb: (sessionId: string) => void): (() => void) => {
+    const channel = `pty:session:${id}`
+    const listener = (_event: unknown, sessionId: string): void => cb(sessionId)
+    ipcRenderer.on(channel, listener)
+    return () => ipcRenderer.removeListener(channel, listener)
+  },
 
   write: (id: string, data: string): void => ipcRenderer.send('pty:write', { id, data }),
 

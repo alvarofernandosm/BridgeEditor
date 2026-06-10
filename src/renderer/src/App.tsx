@@ -13,8 +13,10 @@ export interface CellState {
   mode: 'term' | 'chat'
   /** Nivel de permisos con el que se lanza el agente de esta celda. */
   perm: PermLevel
-  /** true cuando la celda viene de una restauración: el agente se lanza con --continue. */
+  /** true cuando la celda viene de una restauración: claude se relanza con --resume. */
   resume: boolean
+  /** Session id de claude detectado para esta celda de terminal (para el resume exacto). */
+  termSessionId: string | null
   /** Sesión de claude para --resume entre turnos (y entre reinicios). */
   chatSessionId: string | null
   /** Ruta del archivo abierto cuando la celda es un visor (status 'file'). */
@@ -39,6 +41,7 @@ const newCell = (): CellState => ({
   mode: 'term',
   perm: 'default',
   resume: false,
+  termSessionId: null,
   chatSessionId: null,
   file: null,
   cwd: '',
@@ -55,6 +58,7 @@ interface SavedCell {
   agent: AgentKind | null
   mode?: 'term' | 'chat'
   perm?: PermLevel
+  termSessionId?: string | null
   chatSessionId?: string | null
   file: string | null
   cwd: string
@@ -76,8 +80,9 @@ function loadSavedLayout(): CellState[] | null {
         agent,
         mode: s.mode === 'chat' && agent !== 'shell' ? 'chat' : 'term',
         perm: s.perm === 'flexible' || s.perm === 'yolo' ? s.perm : 'default',
-        // las terminales de agente restauradas retoman su última conversación
+        // las terminales de claude restauradas retoman SU conversación (--resume id)
         resume: agent !== null && agent !== 'shell' && s.mode !== 'chat',
+        termSessionId: typeof s.termSessionId === 'string' ? s.termSessionId : null,
         chatSessionId: typeof s.chatSessionId === 'string' ? s.chatSessionId : null,
         file,
         cwd: typeof s.cwd === 'string' ? s.cwd : '',
@@ -125,6 +130,7 @@ export default function App(): JSX.Element {
       agent: c.agent,
       mode: c.mode,
       perm: c.perm,
+      termSessionId: c.termSessionId,
       chatSessionId: c.chatSessionId,
       file: c.file,
       cwd: c.cwd

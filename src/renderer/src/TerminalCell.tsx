@@ -132,6 +132,7 @@ export function TerminalCell({
                 mode,
                 perm,
                 resume: false,
+                termSessionId: null,
                 chatSessionId: null,
                 status: 'running',
                 exitCode: undefined
@@ -167,9 +168,10 @@ export function TerminalCell({
             command={AGENTS[cell.agent].command}
             cwd={cell.cwd}
             perm={cell.perm}
-            resume={cell.resume}
+            resumeSession={cell.resume ? cell.termSessionId : null}
             active={active}
             onExit={(code) => onUpdate(cell.id, { status: 'exited', exitCode: code })}
+            onSession={(sid) => onUpdate(cell.id, { termSessionId: sid })}
             onActivity={(activity) => onUpdate(cell.id, { activity })}
             onAttention={() => onUpdate(cell.id, { attention: true })}
             onUserInput={() => {
@@ -209,9 +211,10 @@ interface TerminalViewProps {
   command: string | null
   cwd: string
   perm: CellState['perm']
-  resume: boolean
+  resumeSession: string | null
   active: boolean
   onExit: (code: number) => void
+  onSession: (sessionId: string) => void
   onActivity: (activity: 'working' | 'idle') => void
   onAttention: () => void
   onUserInput: () => void
@@ -227,9 +230,10 @@ function TerminalView({
   command,
   cwd,
   perm,
-  resume,
+  resumeSession,
   active,
   onExit,
+  onSession,
   onActivity,
   onAttention,
   onUserInput,
@@ -237,8 +241,8 @@ function TerminalView({
 }: TerminalViewProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
-  const cbRef = useRef({ onExit, onActivity, onAttention, onUserInput, onOpenFile })
-  cbRef.current = { onExit, onActivity, onAttention, onUserInput, onOpenFile }
+  const cbRef = useRef({ onExit, onSession, onActivity, onAttention, onUserInput, onOpenFile })
+  cbRef.current = { onExit, onSession, onActivity, onAttention, onUserInput, onOpenFile }
   const activeRef = useRef(active)
   activeRef.current = active
 
@@ -334,7 +338,7 @@ function TerminalView({
     let burstStart = 0
     let working = false
     window.bridge
-      .createPty({ id: ptyId, cwd, command, perm, resume, cols: term.cols, rows: term.rows })
+      .createPty({ id: ptyId, cwd, command, perm, resumeSession, cols: term.cols, rows: term.rows })
       .then(() => {
         if (disposed) {
           window.bridge.kill(ptyId)
@@ -353,6 +357,7 @@ function TerminalView({
           })
         )
         cleanups.push(window.bridge.onExit(ptyId, (code) => cbRef.current.onExit(code)))
+        cleanups.push(window.bridge.onPtySession(ptyId, (sid) => cbRef.current.onSession(sid)))
       })
 
     const quietTimer = window.setInterval(() => {
@@ -467,7 +472,7 @@ function TerminalView({
       term.dispose()
       termRef.current = null
     }
-  }, [ptyId, command, cwd, perm, resume])
+  }, [ptyId, command, cwd, perm, resumeSession])
 
   // Ctrl+Shift+A/D desde App: pegar la ruta elegida en esta terminal.
   useEffect(() => {

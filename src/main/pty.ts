@@ -1,8 +1,64 @@
-import { ipcMain } from 'electron'
+import { ipcMain, type WebContents } from 'electron'
 import * as pty from 'node-pty'
+import { readdir, stat } from 'fs/promises'
+import { join } from 'path'
+import { homedir } from 'os'
 import { applyPermissions, type PermLevel } from './permissions'
 
 const sessions = new Map<string, pty.IPty>()
+
+// Atribución de sesiones de Claude por celda: al lanzar el TUI se vigila
+// ~/.claude/projects/<cwd-codificado>/ hasta ver qué .jsonl nuevo aparece;
+// ese session id pertenece a la celda y permite un --resume exacto al
+// restaurar el layout (--continue mezclaría celdas del mismo directorio).
+const claimedSessions = new Set<string>()
+const sessionTimers = new Map<string, ReturnType<typeof setInterval>>()
+
+function trackClaudeSession(id: string, cwd: string, wc: WebContents): void {
+  const dir = join(homedir(), '.claude', 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'))
+  const spawnTime = Date.now()
+  let attempts = 0
+  const timer = setInterval(async () => {
+    attempts++
+    if (attempts > 40 || !sessions.has(id)) {
+      clearInterval(timer)
+      sessionTimers.delete(id)
+      return
+    }
+    try {
+      const names = await readdir(dir)
+      const candidates: Array<{ sid: string; mtimeMs: number }> = []
+      for (const name of names) {
+        if (!name.endsWith('.jsonl')) continue
+        const sid = name.slice(0, -6)
+        if (claimedSessions.has(sid)) continue
+        const info = await stat(join(dir, name)).catch(() => null)
+        if (info && info.mtimeMs >= spawnTime - 2000) candidates.push({ sid, mtimeMs: info.mtimeMs })
+      }
+      if (candidates.length > 0) {
+        // el más antiguo de los nuevos: si dos celdas arrancaron a la vez,
+        // cada poll reclama uno distinto en orden de creación
+        candidates.sort((a, b) => a.mtimeMs - b.mtimeMs)
+        const sid = candidates[0].sid
+        claimedSessions.add(sid)
+        if (!wc.isDestroyed()) wc.send(`pty:session:${id}`, sid)
+        clearInterval(timer)
+        sessionTimers.delete(id)
+      }
+    } catch {
+      // el directorio del proyecto aún no existe
+    }
+  }, 3000)
+  sessionTimers.set(id, timer)
+}
+
+function stopTracking(id: string): void {
+  const timer = sessionTimers.get(id)
+  if (timer) {
+    clearInterval(timer)
+    sessionTimers.delete(id)
+  }
+}
 
 function defaultShell(): string {
   if (process.platform === 'win32') return 'powershell.exe'
@@ -19,7 +75,7 @@ export function registerPtyHandlers(): void {
         cwd: string
         command: string | null
         perm?: PermLevel
-        resume?: boolean
+        resumeSession?: string | null
         cols: number
         rows: number
       }
@@ -28,13 +84,11 @@ export function registerPtyHandlers(): void {
       const applied = applyPermissions(opts.command, opts.perm ?? 'default')
       const permEnv = applied.env
       let command = applied.command
-      // Celda restaurada: el agente retoma su última conversación del directorio.
-      if (
-        opts.resume &&
-        command &&
-        (command.startsWith('claude') || command.startsWith('opencode'))
-      ) {
-        command += ' --continue'
+      const isClaude = command?.startsWith('claude') ?? false
+      // Celda restaurada con sesión conocida: --resume exacto de ESA conversación.
+      if (opts.resumeSession && isClaude) {
+        claimedSessions.add(opts.resumeSession)
+        command += ` --resume '${opts.resumeSession.replace(/'/g, '')}'`
       }
       const wc = event.sender
       const shellPath = defaultShell()
@@ -61,10 +115,15 @@ export function registerPtyHandlers(): void {
       })
       proc.onExit(({ exitCode }) => {
         sessions.delete(id)
+        stopTracking(id)
         if (!wc.isDestroyed()) wc.send(`pty:exit:${id}`, exitCode)
       })
 
       if (command) proc.write(command + '\r')
+
+      // Sesión nueva de claude: detectar qué session id le corresponde a esta celda.
+      if (isClaude && !opts.resumeSession) trackClaudeSession(id, cwd, wc)
+
       return id
     }
   )
@@ -88,6 +147,7 @@ export function registerPtyHandlers(): void {
   )
 
   ipcMain.on('pty:kill', (_event, { id }: { id: string }) => {
+    stopTracking(id)
     const proc = sessions.get(id)
     if (proc) {
       sessions.delete(id)
