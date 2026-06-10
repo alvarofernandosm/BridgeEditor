@@ -1,6 +1,14 @@
 export {}
 
 declare global {
+  interface CheckpointInfo {
+    id: string
+    sha: string
+    label: string
+    ts: number
+    auto: boolean
+  }
+
   type ChatEvent =
     | { kind: 'init'; sessionId: string }
     | { kind: 'remote-user'; text: string; from: string }
@@ -19,6 +27,8 @@ declare global {
       writePrimary(text: string): void
       readPrimary(): string
       filePathFor(file: File): string
+      dndDebug(info: unknown): void
+      onMenuAction(cb: (action: string) => void): () => void
       chatSend(opts: {
         id: string
         agent: 'claude' | 'opencode'
@@ -27,6 +37,7 @@ declare global {
         sessionId: string | null
         permissionMode: 'plan' | 'edits' | 'flexible' | 'full'
         model?: string | null
+        effort?: string | null
       }): Promise<void>
       chatModels(agent: 'claude' | 'opencode'): Promise<string[]>
       chatCancel(id: string): void
@@ -43,6 +54,7 @@ declare global {
           requestId: string
           agent: 'claude' | 'opencode'
           model: string | null
+          effort: string | null
           cwd: string
         }) => void
       ): () => void
@@ -63,6 +75,10 @@ declare global {
       kill(id: string): void
       onData(id: string, cb: (data: string) => void): () => void
       onExit(id: string, cb: (code: number) => void): () => void
+      ckptCapture(cwd: string, label: string): Promise<CheckpointInfo | null>
+      ckptList(cwd: string): Promise<CheckpointInfo[]>
+      ckptRestore(cwd: string, sha: string): Promise<{ ok: boolean; error?: string }>
+      ckptDelete(cwd: string, id: string): Promise<void>
       pickDirectory(): Promise<string | null>
       homeDir(): Promise<string>
       appVersion(): Promise<string>

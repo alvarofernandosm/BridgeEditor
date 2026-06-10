@@ -5,6 +5,7 @@ import { join } from 'path'
 import { homedir } from 'os'
 import { claudeFlexibleSettingsPath } from './permissions'
 import { bridgeEnv, recordActivity } from './bridge-state'
+import { autoCheckpoint } from './checkpoints'
 
 // Corre Claude Code / OpenCode en modo headless (un proceso por turno) y
 // normaliza su salida a eventos simples para la vista de chat.
@@ -24,6 +25,8 @@ export interface ChatSendOpts {
   permissionMode: 'plan' | 'edits' | 'flexible' | 'full'
   /** Modelo a usar (alias de claude o provider/model de opencode); null = el por defecto. */
   model?: string | null
+  /** Nivel de razonamiento (claude --effort / opencode --variant); null = auto. */
+  effort?: string | null
 }
 
 export interface ChatTurnResult {
@@ -36,6 +39,7 @@ function buildCommand(opts: ChatSendOpts): string {
   if (opts.agent === 'claude') {
     const flags = ['-p', shellQuote(opts.message), '--output-format', 'stream-json', '--verbose']
     if (opts.model) flags.push('--model', shellQuote(opts.model))
+    if (opts.effort) flags.push('--effort', shellQuote(opts.effort))
     if (opts.sessionId) flags.push('--resume', shellQuote(opts.sessionId))
     if (opts.permissionMode === 'full') flags.push('--dangerously-skip-permissions')
     else if (opts.permissionMode === 'plan') flags.push('--permission-mode', 'plan')
@@ -51,7 +55,8 @@ function buildCommand(opts: ChatSendOpts): string {
       : `--session ${shellQuote(opts.sessionId)} `
     : ''
   const model = opts.model ? `--model ${shellQuote(opts.model)} ` : ''
-  return `opencode run --format json ${session}${model}${shellQuote(opts.message)}`
+  const variant = opts.effort ? `--variant ${shellQuote(opts.effort)} ` : ''
+  return `opencode run --format json ${session}${model}${variant}${shellQuote(opts.message)}`
 }
 
 const fmtTokens = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))
@@ -312,13 +317,17 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
 }
 
 export function registerChatHandlers(): void {
-  ipcMain.handle('chat:send', (event, opts: ChatSendOpts) => {
+  ipcMain.handle('chat:send', async (event, opts: ChatSendOpts) => {
     const wc: WebContents = event.sender
     recordActivity({
       cellId: opts.id,
       kind: 'chat-turn',
       detail: opts.message.replace(/\s+/g, ' ').slice(0, 120)
     })
+    // snapshot del workspace antes de un turno que puede editar archivos
+    if (opts.permissionMode !== 'plan') {
+      await autoCheckpoint(opts.cwd, `antes de turno de ${opts.agent}`)
+    }
     return executeChatTurn(opts, (payload) => {
       if (!wc.isDestroyed()) wc.send(`chat:event:${opts.id}`, payload)
     }).then(() => undefined)

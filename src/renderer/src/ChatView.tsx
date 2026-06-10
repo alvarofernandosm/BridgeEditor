@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { renderMarkdown } from './highlight'
+import { CELL_MIME, pathsFromDrop, quotePaths } from './dnd'
 import type { AgentKind } from './App'
 
 interface ChatMsg {
@@ -25,7 +26,9 @@ interface ChatViewProps {
   initialPerm: ChatPerm
   sessionId: string | null
   model: string | null
+  effort: string | null
   onModel: (model: string | null) => void
+  onEffort: (effort: string | null) => void
   onSessionId: (id: string | null) => void
   onActivity: (activity: 'working' | 'idle') => void
   onAttention: () => void
@@ -39,8 +42,21 @@ interface SessionInfo {
 
 const HELP_TEXT =
   '/resume — elegir una sesión anterior · /continue — retomar la más reciente · ' +
-  '/new — conversación nueva · /help — esta ayuda. Cualquier otro /comando se envía ' +
-  'al agente (tus comandos personalizados de .claude/commands funcionan).'
+  '/new — conversación nueva · /compact — resumir el contexto y seguir en sesión ' +
+  'nueva · /help — esta ayuda. Cualquier otro /comando se envía al agente (tus ' +
+  'comandos personalizados de .claude/commands funcionan).'
+
+const COMPACT_PROMPT =
+  'Resume esta conversación de forma compacta para continuarla en una sesión nueva ' +
+  'sin este historial: objetivo, decisiones tomadas, estado actual del trabajo ' +
+  '(archivos tocados, pendientes) y datos concretos imprescindibles. Responde SOLO ' +
+  'con el resumen.'
+
+// Niveles de razonamiento por agente: claude --effort / opencode --variant.
+const EFFORT_OPTIONS: Record<'claude' | 'opencode', string[]> = {
+  claude: ['low', 'medium', 'high', 'xhigh', 'max'],
+  opencode: ['minimal', 'low', 'medium', 'high', 'max']
+}
 
 const PERM_LABELS: Record<ChatPerm, string> = {
   plan: 'solo planear',
@@ -57,7 +73,9 @@ export function ChatView({
   initialPerm,
   sessionId,
   model,
+  effort,
   onModel,
+  onEffort,
   onSessionId,
   onActivity,
   onAttention
@@ -82,6 +100,10 @@ export function ChatView({
   const sessionRef = useRef(sessionId)
   const activeRef = useRef(active)
   activeRef.current = active
+  // /compact: true mientras esperamos el resumen; el resumen listo se adjunta
+  // como contexto al próximo mensaje del usuario en la sesión nueva.
+  const compactingRef = useRef(false)
+  const pendingContextRef = useRef<string | null>(null)
 
   useEffect(() => {
     const off = window.bridge.onChatEvent(cellId, (ev) => {
@@ -134,6 +156,24 @@ export function ChatView({
           }
           if (ev.error) setMessages((ms) => [...ms, { role: 'error', text: ev.error! }])
           else if (ev.meta) setMessages((ms) => [...ms, { role: 'meta', text: ev.meta! }])
+          if (compactingRef.current) {
+            compactingRef.current = false
+            if (!ev.error) {
+              setMessages((ms) => {
+                const summary = [...ms].reverse().find((m) => m.role === 'assistant')?.text
+                pendingContextRef.current = summary ?? null
+                return [
+                  ...ms,
+                  {
+                    role: 'meta',
+                    text: '🧹 contexto compactado — sesión nueva; el resumen de arriba se adjuntará a tu próximo mensaje'
+                  }
+                ]
+              })
+              sessionRef.current = null
+              onSessionId(null)
+            }
+          }
           if (!activeRef.current) onAttention()
           break
         case 'error':
@@ -190,6 +230,7 @@ export function ChatView({
 
   const resetConversation = (): void => {
     sessionRef.current = null
+    pendingContextRef.current = null
     onSessionId(null)
     setMessages([{ role: 'meta', text: 'conversación nueva' }])
   }
@@ -204,6 +245,16 @@ export function ChatView({
     }
     if (cmd === '/help') {
       addMeta(HELP_TEXT)
+      return true
+    }
+    if (cmd === '/compact') {
+      if (!sessionRef.current) {
+        addMeta('no hay conversación que compactar — ya estás en sesión nueva')
+        return true
+      }
+      compactingRef.current = true
+      addMeta('🧹 compactando: pidiendo el resumen al agente…')
+      sendText(COMPACT_PROMPT, null)
       return true
     }
     if (cmd === '/resume' || cmd === '/continue') {
@@ -242,9 +293,11 @@ export function ChatView({
     )
   }
 
-  const sendText = (message: string): void => {
+  // display: lo que se muestra como burbuja del usuario (null = nada, p. ej.
+  // el prompt interno de /compact); message: lo que viaja al agente.
+  const sendText = (message: string, display: string | null = message): void => {
     if (!message || running) return
-    setMessages((ms) => [...ms, { role: 'user', text: message }])
+    if (display !== null) setMessages((ms) => [...ms, { role: 'user', text: display }])
     setRunning(true)
     onActivity('working')
     window.bridge
@@ -255,7 +308,8 @@ export function ChatView({
         message,
         sessionId: sessionRef.current,
         permissionMode: permMode,
-        model
+        model,
+        effort
       })
       .catch((e) => {
         setRunning(false)
@@ -269,11 +323,32 @@ export function ChatView({
     if (!message || running) return
     setInput('')
     if (message.startsWith('/') && handleSlash(message)) return
+    if (pendingContextRef.current) {
+      const wire = `[Resumen de la conversación anterior, compactada]\n${pendingContextRef.current}\n\n---\n\n${message}`
+      pendingContextRef.current = null
+      sendText(wire, message)
+      return
+    }
     sendText(message)
   }
 
   return (
-    <div className="chat-view">
+    <div
+      className="chat-view"
+      onDragOver={(e) => {
+        if (e.dataTransfer.types.includes(CELL_MIME)) return
+        e.preventDefault()
+        e.dataTransfer.dropEffect = 'copy'
+      }}
+      onDrop={(e) => {
+        if (e.dataTransfer.types.includes(CELL_MIME)) return
+        e.preventDefault()
+        const text = quotePaths(pathsFromDrop(e.dataTransfer))
+        if (!text) return
+        setInput((current) => (current ? `${current} ${text}` : text))
+        inputRef.current?.focus()
+      }}
+    >
       <div ref={listRef} className="chat-list">
         {messages.length === 0 && (
           <div className="chat-empty">
@@ -436,6 +511,19 @@ export function ChatView({
             ))}
           </select>
         )}
+        <select
+          className="chat-model"
+          value={effort ?? ''}
+          title="Nivel de razonamiento (claude --effort / opencode --variant)"
+          onChange={(e) => onEffort(e.target.value || null)}
+        >
+          <option value="">effort auto</option>
+          {EFFORT_OPTIONS[agent].map((ef) => (
+            <option key={ef} value={ef}>
+              effort {ef}
+            </option>
+          ))}
+        </select>
         <textarea
           ref={inputRef}
           value={input}

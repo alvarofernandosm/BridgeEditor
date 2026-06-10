@@ -88,18 +88,28 @@ fuera del proyecto sin escribir rutas a mano. Los combos se eligieron para no
 chocar con los atajos de Claude Code/OpenCode: las variantes simples
 (`Ctrl+O`, `Ctrl+A`, `Ctrl+D`) siguen llegando intactas al TUI.
 
-## Paleta de comandos
+## Paleta de comandos y menú
 
 `Ctrl+Shift+P` (o `Ctrl+K` fuera de una terminal) abre la paleta: lanzar un
 agente en una celda nueva (usa el directorio de la celda activa), abrir un
 archivo, cerrar o relanzar la celda activa, o saltar a cualquier celda.
 Filtra escribiendo, navega con ↑/↓ y ejecuta con Enter.
 
+Las acciones principales también viven en el **menú de aplicación** (Archivo ·
+Celda · Workspace · Ayuda): celda nueva, abrir archivo, insertar rutas, puntos
+de control, plantillas, y el Acerca de con la versión.
+
 ## Drag & drop
 
 - Soltar archivos sobre una **terminal** pega sus rutas (entre comillas si hace
   falta) — la forma rápida de adjuntarle un archivo o imagen a Claude Code.
+- Soltar archivos sobre un **chat** inserta sus rutas en el mensaje.
 - Soltar un archivo sobre un **launcher** o un **visor** lo abre en esa celda.
+- Funciona con **varios archivos a la vez**: en sesiones Wayland la app corre
+  como cliente Wayland nativo (`ozone-platform-hint=auto`) — como cliente
+  XWayland, Nautilus solo entrega el primer archivo del drag — y además las
+  rutas se leen también de `text/uri-list`. Cada drop deja diagnóstico en
+  `/tmp/bridgeeditor-dnd.log`.
 
 ## Portapapeles en la terminal
 
@@ -130,6 +140,10 @@ mezclar chats, terminales y visores en la misma grilla.
   instalación (`opencode models`); en Claude, los alias (`fable`, `opus`,
   `sonnet`, `haiku`). Se guarda con el layout y la delegación entre celdas
   respeta el modelo elegido de cada celda.
+- **Selector de effort por chat**: nivel de razonamiento del modelo — en
+  Claude `--effort low|medium|high|xhigh|max`, en OpenCode el *variant* del
+  proveedor (`--variant minimal|…|max`). También se guarda con el layout y lo
+  respeta la delegación.
 - `Enter` envía, `Shift+Enter` hace salto de línea, y hay botón Cancelar
   mientras el agente trabaja.
 - El **razonamiento** (extended thinking) aparece como bloque colapsable 🧠 y
@@ -141,8 +155,12 @@ mezclar chats, terminales y visores en la misma grilla.
   anteriores del directorio (botón ↺ también), `/continue` retoma la más
   reciente, `/new` empieza conversación nueva y `/help` muestra la ayuda.
   Cualquier otro `/comando` se envía al agente — los comandos personalizados
-  de `.claude/commands/` funcionan; los integrados del TUI (`/compact`, etc.)
-  no existen en modo headless.
+  de `.claude/commands/` funcionan.
+- **`/compact`**: el agente resume la conversación, el chat arranca sesión
+  nueva y el resumen se adjunta automáticamente a tu próximo mensaje —
+  contexto liviano sin perder el hilo (el `/compact` del TUI no existe en
+  headless; este lo reemplaza).
+- Soltar archivos sobre el chat inserta sus rutas en el mensaje (drag & drop).
 
 ## Delegación entre celdas (multi-agente)
 
@@ -157,6 +175,11 @@ orquestando a OpenCode con otros modelos en las celdas 2 y 3.
   tarea y bloquea hasta la respuesta.
 - **La primera delegación pide tu permiso** con un diálogo (permitir siempre /
   una vez / denegar), por par origen→destino.
+- **Advertencia entre proyectos**: si la celda destino trabaja en un
+  directorio no relacionado con el del origen (ni igual, ni contenido), el
+  diálogo aparece *siempre* — aun con "permitir siempre" o aprobación por
+  clic — mostrando ambas rutas con ⚠️. Delegar a otro proyecto casi nunca es
+  lo que quieres por accidente.
 - El turno delegado **se ve en vivo en el chat de la celda destino** con la
   etiqueta 📨 de quién lo envió; la respuesta vuelve al orquestador como JSON.
 - Solo las celdas en **modo chat** aceptan delegación (el TUI no tiene salida
@@ -168,9 +191,11 @@ y Y a la 3, luego intégrame los resultados"*.
 
 Además del `/delegate` básico, el puente ofrece:
 
-- **`POST /open-cell`** — el orquestador abre una celda nueva con el agente y
-  modelo que necesite (con tu permiso) y le asigna su primera tarea: arma su
-  propio equipo sobre la marcha.
+- **`POST /open-cell`** — el orquestador abre una celda nueva con el agente,
+  modelo y effort que necesite (con tu permiso) y le asigna su primera tarea:
+  arma su propio equipo sobre la marcha. La skill le indica que si no le
+  especificaste agente/modelo/effort te **pregunte primero** en vez de abrir
+  un clon de sí mismo — la gracia es la diversidad de modelos.
 - **`GET /activity`** — feed de lo ocurrido en las demás celdas (archivos
   guardados, turnos de chat, delegaciones), para que un agente se ponga en
   contexto por demanda.
@@ -181,6 +206,36 @@ Además del `/delegate` básico, el puente ofrece:
   `@delegate(2, "tarea")` en su respuesta: aparece una tarjeta con botón
   **▶ Delegar** (tu clic es el permiso) y el resultado vuelve al orquestador
   como turno nuevo.
+- **`"fresh": true`** en el body de `/delegate` — la celda destino arranca
+  sesión nueva (contexto limpio) en vez de continuar su conversación. Útil
+  para tareas independientes que no necesitan la memoria de esa celda.
+
+## Puntos de control del workspace (deshacer cambios de agentes)
+
+Antes de cada turno de agente que puede editar archivos (chat o delegación),
+BridgeEditor toma un **snapshot automático del workspace** si es un repositorio
+git. Si un agente daña algo, lo deshaces con un clic.
+
+- **📸 Crear punto de control…** (paleta) — snapshot manual con etiqueta, del
+  directorio de la celda activa.
+- **⏪ Restaurar punto de control…** (paleta) — lista los snapshots (🤖
+  automáticos, 📸 manuales) con fecha; al elegir uno se restauran los archivos
+  a ese estado, **guardando antes un snapshot del estado actual** para poder
+  deshacer la restauración.
+
+Cómo funciona por dentro (y por qué es seguro):
+
+- Los snapshots son commits git en **refs ocultas**
+  (`refs/bridge/checkpoints/…`): no aparecen en `git branch` ni en tu log, no
+  tocan HEAD, ni tu índice/staging, ni tus ramas. Se crean con un índice
+  temporal aparte.
+- La restauración solo escribe el **working tree** (`git restore --source`);
+  recupera contenidos modificados y archivos borrados, y **no borra** archivos
+  creados después del snapshot.
+- Si no hay cambios desde el último snapshot, los automáticos no se duplican.
+- Limitaciones: los archivos en `.gitignore` (builds, `node_modules`) quedan
+  fuera del snapshot a propósito, y los cambios dentro de submódulos no se
+  cubren.
 
 ## Plantillas de layout
 

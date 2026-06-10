@@ -4,7 +4,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import '@xterm/xterm/css/xterm.css'
 import type { AgentKind, CellState } from './App'
-import { CELL_MIME } from './dnd'
+import { CELL_MIME, pathsFromDrop, quotePaths } from './dnd'
 import { Launcher } from './Launcher'
 import { FileView } from './FileView'
 import { ChatView } from './ChatView'
@@ -129,8 +129,7 @@ export function TerminalCell({
           if (e.dataTransfer.types.includes(CELL_MIME)) return
           if (cell.status !== 'launcher' && cell.status !== 'file') return
           e.preventDefault()
-          const dropped = e.dataTransfer.files[0]
-          const path = dropped ? window.bridge.filePathFor(dropped) : null
+          const path = pathsFromDrop(e.dataTransfer)[0]
           if (path) onUpdate(cell.id, { status: 'file', file: path })
         }}
       >
@@ -167,7 +166,9 @@ export function TerminalCell({
               }
               sessionId={cell.chatSessionId}
               model={cell.chatModel}
+              effort={cell.chatEffort}
               onModel={(m) => onUpdate(cell.id, { chatModel: m })}
+              onEffort={(ef) => onUpdate(cell.id, { chatEffort: ef })}
               onSessionId={(sid) => onUpdate(cell.id, { chatSessionId: sid })}
               onActivity={(activity) => onUpdate(cell.id, { activity })}
               onAttention={() => onUpdate(cell.id, { attention: true })}
@@ -529,15 +530,9 @@ function TerminalView({
         if (e.dataTransfer.types.includes(CELL_MIME)) return
         e.preventDefault()
         setDragOver(false)
-        const paths = Array.from(e.dataTransfer.files)
-          .map((f) => window.bridge.filePathFor(f))
-          .filter(Boolean)
+        const paths = pathsFromDrop(e.dataTransfer)
         if (paths.length === 0) return
-        // Las rutas con caracteres especiales van entre comillas para el shell.
-        const quoted = paths
-          .map((p) => (/[^\w@%+=:,./-]/.test(p) ? `'${p.replace(/'/g, "'\\''")}'` : p))
-          .join(' ')
-        termRef.current?.paste(quoted)
+        termRef.current?.paste(quotePaths(paths))
         termRef.current?.focus()
       }}
     />

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Grid } from './Grid'
 import { Palette, type PaletteCommand } from './Palette'
 import { AGENTS } from './TerminalCell'
@@ -21,6 +21,8 @@ export interface CellState {
   chatSessionId: string | null
   /** Modelo elegido para el chat (alias de claude o provider/model de opencode). */
   chatModel: string | null
+  /** Nivel de razonamiento del chat (claude --effort / opencode --variant); null = auto. */
+  chatEffort: string | null
   /** Ruta del archivo abierto cuando la celda es un visor (status 'file'). */
   file: string | null
   cwd: string
@@ -46,6 +48,7 @@ const newCell = (): CellState => ({
   termSessionId: null,
   chatSessionId: null,
   chatModel: null,
+  chatEffort: null,
   file: null,
   cwd: '',
   status: 'launcher',
@@ -64,6 +67,7 @@ interface SavedCell {
   termSessionId?: string | null
   chatSessionId?: string | null
   chatModel?: string | null
+  chatEffort?: string | null
   file: string | null
   cwd: string
 }
@@ -83,6 +87,7 @@ function cellsFromSaved(saved: SavedCell[], withSessions: boolean): CellState[] 
       termSessionId: withSessions && typeof s.termSessionId === 'string' ? s.termSessionId : null,
       chatSessionId: withSessions && typeof s.chatSessionId === 'string' ? s.chatSessionId : null,
       chatModel: typeof s.chatModel === 'string' ? s.chatModel : null,
+      chatEffort: typeof s.chatEffort === 'string' ? s.chatEffort : null,
       file,
       cwd: typeof s.cwd === 'string' ? s.cwd : '',
       status: file ? 'file' : agent ? 'running' : 'launcher',
@@ -131,6 +136,15 @@ export default function App(): JSX.Element {
   const [templates, setTemplates] = useState<Record<string, SavedCell[]>>(loadTemplates)
   const [namingTemplate, setNamingTemplate] = useState(false)
   const [templateName, setTemplateName] = useState('')
+  // Puntos de control del workspace (snapshots git de la celda activa)
+  const [ckptNaming, setCkptNaming] = useState<string | null>(null) // cwd objetivo
+  const [ckptLabel, setCkptLabel] = useState('')
+  const [ckptPicker, setCkptPicker] = useState<{ cwd: string; list: CheckpointInfo[] } | null>(null)
+
+  // Acciones del menú de aplicación: el ref se reasigna en cada render para
+  // que el listener (suscrito una sola vez) siempre vea el estado fresco.
+  const menuActionRef = useRef<(action: string) => void>(() => {})
+  useEffect(() => window.bridge.onMenuAction((a) => menuActionRef.current(a)), [])
 
   useEffect(() => {
     window.bridge.homeDir().then(setHome)
@@ -161,6 +175,7 @@ export default function App(): JSX.Element {
         perm: c.perm,
         chatSessionId: c.chatSessionId,
         chatModel: c.chatModel,
+        chatEffort: c.chatEffort,
         termSessionId: c.termSessionId,
         busy: c.activity === 'working'
       }))
@@ -178,6 +193,7 @@ export default function App(): JSX.Element {
         mode: 'chat',
         cwd: spec.cwd,
         chatModel: spec.model,
+        chatEffort: spec.effort ?? null,
         status: 'running'
       }
       let accepted = false
@@ -199,6 +215,7 @@ export default function App(): JSX.Element {
       termSessionId: c.termSessionId,
       chatSessionId: c.chatSessionId,
       chatModel: c.chatModel,
+      chatEffort: c.chatEffort,
       file: c.file,
       cwd: c.cwd
     }))
@@ -209,13 +226,21 @@ export default function App(): JSX.Element {
     setCells((cs) => (cs.length >= MAX_CELLS ? cs : [...cs, newCell()]))
   }, [])
 
-  const closeCell = useCallback((id: string) => {
-    // El kill del PTY ocurre en el desmontaje de TerminalView.
-    setCells((cs) => {
-      const next = cs.filter((c) => c.id !== id)
-      return next.length === 0 ? [newCell()] : next
-    })
-  }, [])
+  const closeCell = useCallback(
+    (id: string) => {
+      // El kill del PTY ocurre en el desmontaje de TerminalView.
+      const idx = cells.findIndex((c) => c.id === id)
+      const rest = cells.filter((c) => c.id !== id)
+      const next = rest.length === 0 ? [newCell()] : rest
+      setCells(next)
+      // Si se cerró la celda activa, activar la vecina: deja el foco en un
+      // terminal vivo (un activeId muerto deja el teclado en tierra de nadie).
+      setActiveId((cur) =>
+        cur === id ? (next[Math.max(0, Math.min(idx, next.length - 1))]?.id ?? null) : cur
+      )
+    },
+    [cells]
+  )
 
   const updateCell = useCallback((id: string, patch: Partial<CellState>) => {
     setCells((cs) => cs.map((c) => (c.id === id ? { ...c, ...patch } : c)))
@@ -256,6 +281,7 @@ export default function App(): JSX.Element {
         mode: c.mode,
         perm: c.perm,
         chatModel: c.chatModel,
+        chatEffort: c.chatEffort,
         file: c.file,
         cwd: c.cwd
       }))
@@ -417,6 +443,70 @@ export default function App(): JSX.Element {
       run: () => activateCell(c.id)
     })
   })
+  const openCkptNaming = (cwd: string): void => {
+    setCkptLabel('')
+    setCkptNaming(cwd)
+  }
+  const openCkptPicker = (cwd: string): void => {
+    window.bridge.ckptList(cwd).then((list) => {
+      if (list.length === 0) {
+        window.alert(`No hay puntos de control para ${cwd} (¿es un repositorio git?)`)
+      } else {
+        setCkptPicker({ cwd, list })
+      }
+    })
+  }
+  if (activeCell?.cwd) {
+    const cwd = activeCell.cwd
+    paletteCommands.push({
+      id: 'ckpt-save',
+      label: '📸 Crear punto de control…',
+      hint: 'snapshot git del workspace',
+      run: () => openCkptNaming(cwd)
+    })
+    paletteCommands.push({
+      id: 'ckpt-restore',
+      label: '⏪ Restaurar punto de control…',
+      hint: cwd,
+      run: () => openCkptPicker(cwd)
+    })
+  }
+
+  const ckptCwd = activeCell?.cwd ?? cells[0]?.cwd
+  menuActionRef.current = (action: string) => {
+    switch (action) {
+      case 'new-cell':
+        addCell()
+        break
+      case 'open-file':
+        window.bridge.pickFile().then((path) => path && openFileInCell(path))
+        break
+      case 'insert-file':
+        insertPathIntoActive('file')
+        break
+      case 'insert-dir':
+        insertPathIntoActive('dir')
+        break
+      case 'close-active':
+        if (activeCell) closeCell(activeCell.id)
+        break
+      case 'template-save':
+        setTemplateName('')
+        setNamingTemplate(true)
+        break
+      case 'ckpt-save':
+        if (ckptCwd) openCkptNaming(ckptCwd)
+        else window.alert('No hay celdas abiertas: abre una celda para elegir el workspace.')
+        break
+      case 'ckpt-restore':
+        if (ckptCwd) openCkptPicker(ckptCwd)
+        else window.alert('No hay celdas abiertas: abre una celda para elegir el workspace.')
+        break
+      case 'palette':
+        setPaletteOpen(true)
+        break
+    }
+  }
   paletteCommands.push({
     id: 'template-save',
     label: '💾 Guardar layout como plantilla…',
@@ -470,6 +560,85 @@ export default function App(): JSX.Element {
         onSwap={swapCells}
       />
       {paletteOpen && <Palette commands={paletteCommands} onClose={() => setPaletteOpen(false)} />}
+      {ckptNaming && (
+        <div
+          className="palette-overlay"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setCkptNaming(null)
+          }}
+        >
+          <div className="palette">
+            <input
+              autoFocus
+              value={ckptLabel}
+              placeholder="Etiqueta del punto de control (Enter guarda, Esc cancela)"
+              spellCheck={false}
+              onChange={(e) => setCkptLabel(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') setCkptNaming(null)
+                else if (e.key === 'Enter') {
+                  const cwd = ckptNaming
+                  const label = ckptLabel.trim() || 'manual'
+                  setCkptNaming(null)
+                  window.bridge.ckptCapture(cwd, label).then((c) => {
+                    if (!c) window.alert(`No se pudo crear el punto de control en ${cwd} (¿es un repositorio git?)`)
+                  })
+                }
+              }}
+            />
+          </div>
+        </div>
+      )}
+      {ckptPicker && (
+        <div
+          className="palette-overlay"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) setCkptPicker(null)
+          }}
+        >
+          <div className="palette">
+            <div className="ckpt-head">
+              ⏪ Restaurar workspace — <code>{ckptPicker.cwd}</code>
+            </div>
+            <ul className="palette-list">
+              {ckptPicker.list.map((c) => (
+                <li
+                  key={c.id}
+                  onMouseDown={(e) => {
+                    e.preventDefault()
+                    const when = new Date(c.ts).toLocaleString('es-CO')
+                    if (
+                      !window.confirm(
+                        `¿Restaurar los archivos de ${ckptPicker.cwd} al estado "${c.label}" (${when})?\n\n` +
+                          'Se guarda antes un punto de control automático del estado actual ' +
+                          '(podrás deshacer la restauración). Los archivos creados después no se borran.'
+                      )
+                    ) {
+                      return
+                    }
+                    setCkptPicker(null)
+                    window.bridge.ckptRestore(ckptPicker.cwd, c.sha).then((r) => {
+                      window.alert(r.ok ? '⏪ Workspace restaurado' : `Falló la restauración: ${r.error}`)
+                    })
+                  }}
+                >
+                  <span>
+                    {c.auto ? '🤖' : '📸'} {c.label}
+                  </span>
+                  <span className="palette-hint">
+                    {new Date(c.ts).toLocaleString('es-CO', {
+                      day: '2-digit',
+                      month: 'short',
+                      hour: '2-digit',
+                      minute: '2-digit'
+                    })}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      )}
       {namingTemplate && (
         <div
           className="palette-overlay"

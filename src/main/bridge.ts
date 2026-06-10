@@ -5,6 +5,7 @@ import { mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import { executeChatTurn } from './chat'
+import { autoCheckpoint } from './checkpoints'
 import { setBridgeEnv, recordActivity, getActivity } from './bridge-state'
 
 // Puente de delegación entre celdas: un servidor HTTP local (solo loopback,
@@ -23,6 +24,7 @@ interface CellInfo {
   perm: 'default' | 'flexible' | 'yolo'
   chatSessionId: string | null
   chatModel: string | null
+  chatEffort: string | null
   termSessionId: string | null
   busy: boolean
 }
@@ -39,7 +41,13 @@ const MAX_CELLS = 6
 function findCell(target: unknown): CellInfo | undefined {
   if (typeof target === 'number') return registry.find((c) => c.index === target)
   if (typeof target === 'string') {
-    return registry.find((c) => c.id === target) ?? registry.find((c) => String(c.index) === target)
+    const byId = registry.find((c) => c.id === target)
+    if (byId) return byId
+    // "6", "#6", "celda 6", "cell 6" → número visible en la UI. La forma con
+    // guion ("cell-6") es el formato del id interno: NO se interpreta como
+    // número, para que un id viejo no caiga en la celda equivocada.
+    const m = target.trim().match(/^(?:(?:celda|cell)\s+|#)?(\d+)$/i)
+    if (m) return registry.find((c) => c.index === Number(m[1]))
   }
   return undefined
 }
@@ -47,6 +55,16 @@ function findCell(target: unknown): CellInfo | undefined {
 const fromLabelOf = (fromCellId: unknown): string => {
   const cell = typeof fromCellId === 'string' ? findCell(fromCellId) : undefined
   return cell ? `La celda ${cell.index} (${cell.label})` : 'Un agente'
+}
+
+// Mismo proyecto = mismo directorio o uno contiene al otro. Si los cwd no
+// están relacionados, la delegación cruza de proyecto y merece advertencia.
+function sameProject(a: string, b: string): boolean {
+  if (!a || !b) return true // sin información no alarmamos
+  const norm = (p: string): string => (p.length > 1 && p.endsWith('/') ? p.slice(0, -1) : p)
+  const x = norm(a)
+  const y = norm(b)
+  return x === y || x.startsWith(`${y}/`) || y.startsWith(`${x}/`)
 }
 
 async function askPermission(fromLabel: string, pairKey: string, message: string, detail: string): Promise<boolean> {
@@ -76,9 +94,20 @@ async function delegateToCell(params: {
   message: string
   fromCellId?: unknown
   skipPermission?: boolean
+  /** true → la celda destino arranca sesión nueva (sin su contexto previo). */
+  fresh?: boolean
 }): Promise<DelegateOutcome> {
   const target = findCell(params.targetRef)
-  if (!target) return { status: 404, payload: { error: `no existe la celda ${String(params.targetRef)}` } }
+  if (!target) {
+    return {
+      status: 404,
+      payload: {
+        error:
+          `no existe la celda "${String(params.targetRef)}". Usa el número que ve el usuario ` +
+          `(campo "cell" de GET /cells, p. ej. 6) o el id interno exacto (p. ej. "cell-7").`
+      }
+    }
+  }
 
   const isChatTarget = target.mode === 'chat' && target.agent && target.agent !== 'shell'
   const isConsultTarget =
@@ -98,13 +127,26 @@ async function delegateToCell(params: {
   if (fromCell?.id === target.id) return { status: 400, payload: { error: 'no puedes delegarte a ti mismo' } }
   const fromLabel = fromLabelOf(params.fromCellId)
 
-  if (!params.skipPermission) {
+  // Delegación que cruza de proyecto (cwd destino no relacionado con el del
+  // origen): el diálogo aparece SIEMPRE — incluso con "permitir siempre" del
+  // par o con aprobación por clic — y con advertencia explícita de rutas.
+  const crossProject = fromCell ? !sameProject(fromCell.cwd, target.cwd) : false
+
+  if (!params.skipPermission || crossProject) {
     const verb = isChatTarget ? 'delegar trabajo en' : 'consultar la conversación de'
+    const warn = crossProject
+      ? `\n\n⚠️ OJO: la celda ${target.index} trabaja en OTRO proyecto.\n` +
+        `Origen:  ${fromCell?.cwd}\nDestino: ${target.cwd}\n` +
+        `La tarea se ejecutaría sobre ese otro directorio.`
+      : ''
+    const pairKey = crossProject
+      ? `${fromLabel}→${target.id}:${fromCell?.cwd}→${target.cwd}`
+      : `${fromLabel}→${target.id}`
     const ok = await askPermission(
       fromLabel,
-      `${fromLabel}→${target.id}`,
-      `${fromLabel} quiere ${verb} la celda ${target.index} (${target.label})`,
-      `Directorio: ${target.cwd}\n\nEl agente orquestador podrá enviarle tareas y leer sus respuestas.`
+      pairKey,
+      `${fromLabel} quiere ${verb} la celda ${target.index} (${target.label})${crossProject ? ' — ⚠️ otro proyecto' : ''}`,
+      `Directorio: ${target.cwd}\n\nEl agente orquestador podrá enviarle tareas y leer sus respuestas.${warn}`
     )
     if (!ok) return { status: 403, payload: { error: 'el usuario denegó la delegación' } }
   }
@@ -112,7 +154,7 @@ async function delegateToCell(params: {
   recordActivity({
     cellId: target.id,
     kind: 'delegation',
-    detail: `${fromLabel} → celda ${target.index}: ${params.message.replace(/\s+/g, ' ').slice(0, 100)}`
+    detail: `${crossProject ? '⚠ otro proyecto · ' : ''}${fromLabel} → celda ${target.index}: ${params.message.replace(/\s+/g, ' ').slice(0, 100)}`
   })
 
   delegating.add(target.id)
@@ -123,16 +165,21 @@ async function delegateToCell(params: {
         if (wc && !wc.isDestroyed()) wc.send(`chat:event:${target.id}`, payload)
       }
       emit({ kind: 'remote-user', text: params.message, from: fromLabel })
+      if (params.fresh) emit({ kind: 'done', sessionId: null, meta: 'sesión nueva (delegación fresh)' })
       emit({ kind: 'turn-start' })
+      const permissionMode = PERM_MAP[target.perm] ?? 'edits'
+      // snapshot del workspace antes de un turno delegado (siempre puede editar)
+      await autoCheckpoint(target.cwd, `antes de delegación a celda ${target.index}`)
       const result = await executeChatTurn(
         {
           id: target.id,
           agent: target.agent as 'claude' | 'opencode',
           cwd: target.cwd,
           message: params.message,
-          sessionId: target.chatSessionId,
-          permissionMode: PERM_MAP[target.perm] ?? 'edits',
-          model: target.chatModel
+          sessionId: params.fresh ? null : target.chatSessionId,
+          permissionMode,
+          model: target.chatModel,
+          effort: target.chatEffort
         },
         emit
       )
@@ -172,6 +219,7 @@ const openRequests = new Map<string, (cellId: string | null) => void>()
 function requestOpenCell(spec: {
   agent: 'claude' | 'opencode'
   model: string | null
+  effort: string | null
   cwd: string
 }): Promise<string | null> {
   const wc = getWin()?.webContents
@@ -253,8 +301,8 @@ export function registerBridge(getWindow: () => BrowserWindow | null): void {
           const chatOk = c.mode === 'chat' && c.agent !== null && c.agent !== 'shell'
           const consultOk = c.mode === 'term' && c.agent === 'claude' && c.termSessionId !== null
           return {
+            cell: c.index,
             id: c.id,
-            index: c.index,
             label: c.label,
             agent: c.agent,
             mode: c.mode,
@@ -283,7 +331,7 @@ export function registerBridge(getWindow: () => BrowserWindow | null): void {
     }
 
     if (req.method === 'POST' && req.url === '/delegate') {
-      let body: { target?: unknown; message?: unknown; from?: unknown }
+      let body: { target?: unknown; message?: unknown; from?: unknown; fresh?: unknown }
       try {
         body = JSON.parse(await readBody(req))
       } catch {
@@ -291,12 +339,24 @@ export function registerBridge(getWindow: () => BrowserWindow | null): void {
       }
       const message = typeof body.message === 'string' ? body.message.trim() : ''
       if (!message) return json(res, 400, { error: 'falta "message"' })
-      const outcome = await delegateToCell({ targetRef: body.target, message, fromCellId: body.from })
+      const outcome = await delegateToCell({
+        targetRef: body.target,
+        message,
+        fromCellId: body.from,
+        fresh: body.fresh === true
+      })
       return json(res, outcome.status, outcome.payload)
     }
 
     if (req.method === 'POST' && req.url === '/open-cell') {
-      let body: { agent?: unknown; model?: unknown; cwd?: unknown; message?: unknown; from?: unknown }
+      let body: {
+        agent?: unknown
+        model?: unknown
+        effort?: unknown
+        cwd?: unknown
+        message?: unknown
+        from?: unknown
+      }
       try {
         body = JSON.parse(await readBody(req))
       } catch {
@@ -309,18 +369,20 @@ export function registerBridge(getWindow: () => BrowserWindow | null): void {
       const fromLabel = fromLabelOf(body.from)
       const fromCell = typeof body.from === 'string' ? findCell(body.from) : undefined
       const model = typeof body.model === 'string' ? body.model : null
+      const effort = typeof body.effort === 'string' ? body.effort : null
       const cwd = typeof body.cwd === 'string' && body.cwd ? body.cwd : (fromCell?.cwd ?? homedir())
       const message = typeof body.message === 'string' ? body.message.trim() : ''
 
       const ok = await askPermission(
         fromLabel,
         `${fromLabel}→open-cell`,
-        `${fromLabel} quiere abrir una celda nueva de chat con ${agent}${model ? ` (${model})` : ''}`,
+        `${fromLabel} quiere abrir una celda nueva de chat con ${agent}` +
+          `${model ? ` (${model}${effort ? `, effort ${effort}` : ''})` : effort ? ` (effort ${effort})` : ''}`,
         `Directorio: ${cwd}${message ? `\n\nY asignarle esta tarea:\n${message.slice(0, 300)}` : ''}`
       )
       if (!ok) return json(res, 403, { error: 'el usuario denegó abrir la celda' })
 
-      const cellId = await requestOpenCell({ agent, model, cwd })
+      const cellId = await requestOpenCell({ agent, model, effort, cwd })
       if (!cellId) return json(res, 502, { error: 'no se pudo crear la celda' })
       const created = await waitForCellInRegistry(cellId)
       if (!created) return json(res, 502, { error: 'la celda no apareció en el registro' })
@@ -381,6 +443,15 @@ entorno puedes orquestar a los agentes de las otras celdas (la tuya es
 curl -s "$BRIDGE_API/cells" -H "Authorization: Bearer $BRIDGE_TOKEN"
 \`\`\`
 
+Cada celda trae DOS identificadores — no los confundas:
+
+- \`cell\` (número 1–6): la posición que VE EL USUARIO en la grilla. Cuando el
+  usuario dice "la celda 6", es esto. Úsalo como \`target\` (sin preguntar).
+  Cambia si el usuario reordena las celdas.
+- \`id\` (p. ej. \`"cell-7"\`): identificador interno estable; NO es la posición
+  (el contador nunca se reusa). Úsalo como \`target\` solo en tareas largas,
+  porque sobrevive a reordenamientos.
+
 \`delegationType\` indica cómo acepta trabajo: \`chat\` (delegación completa,
 visible en su celda) o \`consult\` (terminal de Claude: pregunta respondida con
 el contexto de SU conversación, sin modificarla).
@@ -394,18 +465,43 @@ curl -s -X POST "$BRIDGE_API/delegate" \\
   -d "{\\"target\\": 2, \\"message\\": \\"<tarea autocontenida>\\", \\"from\\": \\"$BRIDGE_CELL_ID\\"}"
 \`\`\`
 
+\`target\` acepta el número de celda que usa el usuario (\`2\`, \`"celda 2"\` y
+\`"cell 2"\` también valen) o un id interno exacto (\`"cell-7"\`). Si el usuario
+dice "delega a la celda 6", el target es \`6\` — no necesitas confirmar.
+
 La respuesta trae \`.text\`. Errores: \`403\` usuario denegó, \`409\` ocupada o no
-acepta delegación. Puedes delegar a varias celdas en paralelo (curl en
-background) y recoger resultados.
+acepta delegación, \`404\` celda inexistente. Puedes delegar a varias celdas en
+paralelo (curl en background) y recoger resultados.
+
+Si la celda destino trabaja en un directorio NO relacionado con el tuyo
+(otro proyecto), el usuario verá un diálogo de advertencia. Prefiere celdas
+del mismo proyecto; para trabajar en otro proyecto es mejor abrir una celda
+nueva con el \`cwd\` correcto (/open-cell) o avisarle al usuario.
+
+Por defecto la celda destino CONTINÚA su conversación (recuerda lo anterior).
+Para una tarea independiente que no necesita ese contexto, agrega
+\`"fresh": true\` al body: la celda arranca sesión nueva (contexto limpio).
 
 ## Abrir una celda nueva con un agente/modelo y asignarle trabajo
+
+ANTES de abrir: si el usuario NO especificó agente, modelo o effort, PREGÚNTALE
+qué quiere (¿claude u opencode? ¿qué modelo? ¿qué nivel de razonamiento?) en
+lugar de decidir por él. En particular NO abras por defecto un clon de tu mismo
+modelo: el valor del multi-agente está en combinar modelos distintos. Solo
+procede sin preguntar si el usuario ya lo dijo o te pidió explícitamente que
+elijas tú.
 
 \`\`\`bash
 curl -s -X POST "$BRIDGE_API/open-cell" \\
   -H "Authorization: Bearer $BRIDGE_TOKEN" -H "Content-Type: application/json" \\
   --max-time 900 \\
-  -d "{\\"agent\\": \\"opencode\\", \\"model\\": \\"opencode-go/kimi-k2.6\\", \\"cwd\\": \\"/ruta/proyecto\\", \\"message\\": \\"<primera tarea (opcional)>\\", \\"from\\": \\"$BRIDGE_CELL_ID\\"}"
+  -d "{\\"agent\\": \\"opencode\\", \\"model\\": \\"opencode-go/kimi-k2.6\\", \\"effort\\": \\"high\\", \\"cwd\\": \\"/ruta/proyecto\\", \\"message\\": \\"<primera tarea (opcional)>\\", \\"from\\": \\"$BRIDGE_CELL_ID\\"}"
 \`\`\`
+
+\`effort\` es opcional (nivel de razonamiento): para claude \`low|medium|high|\`
+\`xhigh|max\`; para opencode es el variant del proveedor (\`minimal|high|max\`…).
+Los modelos de opencode se listan con \`opencode models\`; los de claude son sus
+alias (\`fable\`, \`opus\`, \`sonnet\`, \`haiku\`).
 
 ## Feed de actividad (qué ha pasado en las demás celdas)
 

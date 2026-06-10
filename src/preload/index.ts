@@ -17,6 +17,16 @@ const api = {
   /** Ruta real en disco de un File arrastrado (drag & drop). */
   filePathFor: (file: File): string => webUtils.getPathForFile(file),
 
+  /** Registro de diagnóstico de drops (a <tmp>/bridgeeditor-dnd.log). */
+  dndDebug: (info: unknown): void => ipcRenderer.send('debug:dnd', info),
+
+  /** Acciones del menú de aplicación (Archivo, Celda, Workspace, Ayuda). */
+  onMenuAction: (cb: (action: string) => void): (() => void) => {
+    const listener = (_event: unknown, action: string): void => cb(action)
+    ipcRenderer.on('menu:action', listener)
+    return () => ipcRenderer.removeListener('menu:action', listener)
+  },
+
   chatSend: (opts: {
     id: string
     agent: 'claude' | 'opencode'
@@ -25,6 +35,7 @@ const api = {
     sessionId: string | null
     permissionMode: 'plan' | 'edits' | 'flexible' | 'full'
     model?: string | null
+    effort?: string | null
   }): Promise<void> => ipcRenderer.invoke('chat:send', opts),
 
   chatModels: (agent: 'claude' | 'opencode'): Promise<string[]> =>
@@ -55,11 +66,23 @@ const api = {
 
   /** El main pide abrir una celda (POST /open-cell del puente). */
   onOpenCellRequest: (
-    cb: (spec: { requestId: string; agent: 'claude' | 'opencode'; model: string | null; cwd: string }) => void
+    cb: (spec: {
+      requestId: string
+      agent: 'claude' | 'opencode'
+      model: string | null
+      effort: string | null
+      cwd: string
+    }) => void
   ): (() => void) => {
     const listener = (
       _event: unknown,
-      spec: { requestId: string; agent: 'claude' | 'opencode'; model: string | null; cwd: string }
+      spec: {
+        requestId: string
+        agent: 'claude' | 'opencode'
+        model: string | null
+        effort: string | null
+        cwd: string
+      }
     ): void => cb(spec)
     ipcRenderer.on('cells:open-request', listener)
     return () => ipcRenderer.removeListener('cells:open-request', listener)
@@ -107,6 +130,24 @@ const api = {
     ipcRenderer.on(channel, listener)
     return () => ipcRenderer.removeListener(channel, listener)
   },
+
+  /** Puntos de control del workspace (snapshots git en refs ocultas). */
+  ckptCapture: (
+    cwd: string,
+    label: string
+  ): Promise<{ id: string; sha: string; label: string; ts: number; auto: boolean } | null> =>
+    ipcRenderer.invoke('ckpt:capture', { cwd, label }),
+
+  ckptList: (
+    cwd: string
+  ): Promise<Array<{ id: string; sha: string; label: string; ts: number; auto: boolean }>> =>
+    ipcRenderer.invoke('ckpt:list', cwd),
+
+  ckptRestore: (cwd: string, sha: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('ckpt:restore', { cwd, sha }),
+
+  ckptDelete: (cwd: string, id: string): Promise<void> =>
+    ipcRenderer.invoke('ckpt:delete', { cwd, id }),
 
   pickDirectory: (): Promise<string | null> => ipcRenderer.invoke('dialog:pickDirectory'),
 

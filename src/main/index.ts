@@ -1,12 +1,101 @@
 import { app, BrowserWindow, ipcMain, dialog, shell, Menu } from 'electron'
+import { appendFile } from 'fs'
 import { join } from 'path'
 import os from 'os'
 import { registerPtyHandlers, killAllPtys } from './pty'
 import { registerFileHandlers, unwatchAllFiles } from './files'
 import { registerChatHandlers, killAllChats } from './chat'
 import { registerBridge } from './bridge'
+import { registerCheckpointHandlers } from './checkpoints'
+
+// En sesiones Wayland corre como cliente Wayland nativo (en X11 sigue X11).
+// Como cliente XWayland, arrastrar VARIOS archivos desde Nautilus no funciona:
+// el puente XDND solo entrega uno; el soporte completo está en el ozone Wayland.
+app.commandLine.appendSwitch('ozone-platform-hint', 'auto')
 
 let mainWindow: BrowserWindow | null = null
+
+// Las acciones del menú viajan al renderer, que las despacha a las mismas
+// funciones de la paleta. Los aceleradores Ctrl+Shift+* ya los maneja el
+// renderer: se muestran pero no se registran (evita doble disparo).
+function sendMenuAction(action: string): void {
+  const wc = mainWindow?.webContents
+  if (wc && !wc.isDestroyed()) wc.send('menu:action', action)
+}
+
+function buildAppMenu(): void {
+  const template: Electron.MenuItemConstructorOptions[] = [
+    ...(process.platform === 'darwin'
+      ? [{ role: 'appMenu' as const }]
+      : []),
+    {
+      label: 'Archivo',
+      submenu: [
+        { label: 'Nueva celda', click: () => sendMenuAction('new-cell') },
+        { label: 'Abrir archivo en la celda activa…', click: () => sendMenuAction('open-file') },
+        { type: 'separator' },
+        { role: 'quit', label: 'Salir' }
+      ]
+    },
+    {
+      label: 'Celda',
+      submenu: [
+        {
+          label: 'Insertar ruta de archivo…',
+          accelerator: 'Ctrl+Shift+A',
+          registerAccelerator: false,
+          click: () => sendMenuAction('insert-file')
+        },
+        {
+          label: 'Insertar ruta de carpeta…',
+          accelerator: 'Ctrl+Shift+D',
+          registerAccelerator: false,
+          click: () => sendMenuAction('insert-dir')
+        },
+        { type: 'separator' },
+        { label: 'Cerrar celda activa', click: () => sendMenuAction('close-active') }
+      ]
+    },
+    {
+      label: 'Workspace',
+      submenu: [
+        { label: '📸 Crear punto de control…', click: () => sendMenuAction('ckpt-save') },
+        { label: '⏪ Restaurar punto de control…', click: () => sendMenuAction('ckpt-restore') },
+        { type: 'separator' },
+        { label: '💾 Guardar layout como plantilla…', click: () => sendMenuAction('template-save') }
+      ]
+    },
+    {
+      label: 'Ayuda',
+      submenu: [
+        {
+          label: 'Paleta de comandos',
+          accelerator: 'Ctrl+Shift+P',
+          registerAccelerator: false,
+          click: () => sendMenuAction('palette')
+        },
+        { type: 'separator' },
+        {
+          label: 'GitHub del proyecto',
+          click: () => shell.openExternal('https://github.com/alvarofernandosm/BridgeEditor')
+        },
+        {
+          label: 'Acerca de BridgeEditor',
+          click: () =>
+            dialog.showMessageBox({
+              title: 'BridgeEditor',
+              message: `BridgeEditor v${app.getVersion()}`,
+              detail:
+                'IDE agéntico: grilla dinámica de terminales, chats y visores para ' +
+                'Claude Code y OpenCode, con delegación multi-agente y puntos de ' +
+                'control del workspace.\n\nMIT · github.com/alvarofernandosm/BridgeEditor'
+            })
+        }
+      ]
+    }
+  ]
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
+}
 
 function createWindow(): void {
   const iconPath = app.isPackaged
@@ -22,7 +111,7 @@ function createWindow(): void {
     backgroundColor: '#0d1117',
     title: 'BridgeEditor',
     icon: iconPath,
-    autoHideMenuBar: true,
+    autoHideMenuBar: false,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false
@@ -76,11 +165,12 @@ app.whenReady().then(() => {
   // En Linux/Windows el menú por defecto intercepta Ctrl+C (rol "copy") y nunca
   // llega a la terminal. En macOS se conserva: ahí los roles de Edit son los que
   // hacen funcionar Cmd+C/V en los inputs y el editor de archivos.
-  if (process.platform !== 'darwin') Menu.setApplicationMenu(null)
+  buildAppMenu()
 
   registerPtyHandlers()
   registerFileHandlers()
   registerChatHandlers()
+  registerCheckpointHandlers()
   registerBridge(() => mainWindow)
 
   // Menú contextual nativo de la terminal; resuelve con la acción elegida.
@@ -129,6 +219,13 @@ app.whenReady().then(() => {
 
   ipcMain.handle('app:homeDir', () => os.homedir())
   ipcMain.handle('app:version', () => app.getVersion())
+
+  // Caja negra del drag & drop: cada drop registra qué entregó Chromium
+  // (tipos, files, uri-list) para diagnosticar sin adivinar.
+  ipcMain.on('debug:dnd', (_event, info: unknown) => {
+    const line = `${new Date().toISOString()} ${JSON.stringify(info)}\n`
+    appendFile(join(os.tmpdir(), 'bridgeeditor-dnd.log'), line, () => {})
+  })
 
   createWindow()
 
