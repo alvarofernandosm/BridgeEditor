@@ -145,10 +145,11 @@ celda**: puedes mezclar chats, terminales y visores en la misma grilla.
 
 Particularidades de **Antigravity** (`agy`): los modelos llevan el effort en
 el nombre ("Gemini 3.5 Flash (High)", "Claude Sonnet 4.6 (Thinking)"…), así
-que no hay selector de effort aparte; su modo print no expone tokens/costo
-(solo duración); y la conversación continúa entre turnos pero **no se retoma
-tras reiniciar la app** (su CLI reimprime el historial completo en cada
-respuesta — el filtrado vive en memoria).
+que no hay selector de effort aparte, y su modo print no expone tokens/costo
+(solo duración). Las conversaciones se retoman entre turnos y entre reinicios
+— tanto en chat como en celdas TUI (`--conversation` con rastreo por celda,
+como el `--resume` de Claude); el filtrado del historial que su CLI reimprime
+se persiste en el perfil de la app.
 
 - Por debajo corre el modo headless (`claude -p --output-format stream-json`,
   `opencode run`); por encima ves burbujas, **markdown renderizado**, chips de

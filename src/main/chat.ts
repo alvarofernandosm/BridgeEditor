@@ -1,11 +1,13 @@
-import { ipcMain, type WebContents } from 'electron'
+import { app, ipcMain, type WebContents } from 'electron'
 import { spawn, type ChildProcess } from 'child_process'
+import { readFileSync, writeFileSync } from 'fs'
 import { readdir, stat, open } from 'fs/promises'
 import { join } from 'path'
 import { homedir } from 'os'
 import { claudeFlexibleSettingsPath } from './permissions'
 import { bridgeEnv, recordActivity } from './bridge-state'
 import { autoCheckpoint } from './checkpoints'
+import { claimSession, isSessionClaimed } from './pty'
 
 // Corre Claude Code / OpenCode en modo headless (un proceso por turno) y
 // normaliza su salida a eventos simples para la vista de chat.
@@ -213,21 +215,48 @@ const stripAnsi = (s: string): string =>
 // --- Antigravity (agy) ---
 // Su modo print reimprime TODO el historial de la conversación y agrega la
 // respuesta nueva al final. Guardamos la salida acumulada por conversación
-// (solo en memoria: por eso los chats de agy no se retoman entre reinicios)
-// y la respuesta del turno es el sufijo que aparece después del prefijo conocido.
-const agyTranscripts = new Map<string, string>()
+// (persistida en userData para que el resume sobreviva reinicios) y la
+// respuesta del turno es el sufijo que aparece después del prefijo conocido.
+const AGY_TRANSCRIPTS_LIMIT = 40
+let agyTranscriptsLoaded: Map<string, string> | null = null
+
+const agyTranscriptsPath = (): string => join(app.getPath('userData'), 'agy-transcripts.json')
+
+function agyTranscripts(): Map<string, string> {
+  if (agyTranscriptsLoaded) return agyTranscriptsLoaded
+  try {
+    const raw = JSON.parse(readFileSync(agyTranscriptsPath(), 'utf8')) as Record<string, string>
+    agyTranscriptsLoaded = new Map(Object.entries(raw))
+  } catch {
+    agyTranscriptsLoaded = new Map()
+  }
+  return agyTranscriptsLoaded
+}
+
+function rememberAgyTranscript(convId: string, full: string): void {
+  const m = agyTranscripts()
+  m.delete(convId) // re-insertar refresca el orden (Map conserva orden de inserción)
+  m.set(convId, full)
+  while (m.size > AGY_TRANSCRIPTS_LIMIT) m.delete(m.keys().next().value as string)
+  try {
+    writeFileSync(agyTranscriptsPath(), JSON.stringify(Object.fromEntries(m)))
+  } catch {
+    // sin disco no hay persistencia, pero el turno sigue funcionando
+  }
+}
+
 const AGY_CONV_DIR = join(homedir(), '.gemini', 'antigravity-cli', 'conversations')
 
 // El id de una conversación nueva es el nombre del archivo .db/.pb más
 // reciente en el directorio de conversaciones (mismo truco que el rastreo
-// de sesiones de claude por celda).
+// de sesiones de claude por celda). Se saltan las reclamadas por celdas TUI.
 async function latestAgyConversation(sinceMs: number): Promise<string | null> {
   try {
     const names = await readdir(AGY_CONV_DIR)
     let best: { id: string; mtime: number } | null = null
     for (const name of names) {
       const m = name.match(/^(.+)\.(db|pb)$/)
-      if (!m) continue
+      if (!m || isSessionClaimed(m[1])) continue
       const st = await stat(join(AGY_CONV_DIR, name)).catch(() => null)
       if (!st || st.mtimeMs < sinceMs - 2000) continue
       if (!best || st.mtimeMs > best.mtime) best = { id: m[1], mtime: st.mtimeMs }
@@ -270,6 +299,9 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
     }
 
     const cmd = buildCommand(opts)
+    // que el rastreador de celdas TUI no reclame la conversación de este chat
+    // (su archivo .db recibe mtime nuevo con cada turno)
+    if (opts.agent === 'antigravity' && opts.sessionId) claimSession(opts.sessionId)
     const env = {
       ...process.env,
       ...bridgeEnv(),
@@ -349,10 +381,11 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
         const full = stripAnsi(agyOut).trim()
         // conversación: la conocida, o la recién creada por este turno
         const convId = opts.sessionId ?? (await latestAgyConversation(startTime))
-        const prev = opts.sessionId ? (agyTranscripts.get(opts.sessionId) ?? '') : ''
+        if (convId) claimSession(convId) // que el rastreador TUI no la reclame
+        const prev = opts.sessionId ? (agyTranscripts().get(opts.sessionId) ?? '') : ''
         let text = full
         if (prev && full.startsWith(prev)) text = full.slice(prev.length).trim()
-        if (convId) agyTranscripts.set(convId, full)
+        if (convId) rememberAgyTranscript(convId, full)
         if (text) send({ kind: 'text', text })
         send({
           kind: 'done',

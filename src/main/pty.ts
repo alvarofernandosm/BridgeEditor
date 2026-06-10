@@ -15,6 +15,15 @@ const sessions = new Map<string, pty.IPty>()
 const claimedSessions = new Set<string>()
 const sessionTimers = new Map<string, ReturnType<typeof setInterval>>()
 
+/** Marca una sesión/conversación como propiedad de una celda (claude o agy). */
+export function claimSession(sid: string): void {
+  claimedSessions.add(sid)
+}
+
+export function isSessionClaimed(sid: string): boolean {
+  return claimedSessions.has(sid)
+}
+
 function trackClaudeSession(id: string, cwd: string, wc: WebContents): void {
   const dir = join(homedir(), '.claude', 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'))
   const spawnTime = Date.now()
@@ -48,6 +57,44 @@ function trackClaudeSession(id: string, cwd: string, wc: WebContents): void {
       }
     } catch {
       // el directorio del proyecto aún no existe
+    }
+  }, 3000)
+  sessionTimers.set(id, timer)
+}
+
+// Igual que trackClaudeSession pero para Antigravity: las conversaciones de
+// agy viven como <uuid>.db en un directorio global (no por proyecto).
+const AGY_CONV_DIR = join(homedir(), '.gemini', 'antigravity-cli', 'conversations')
+
+function trackAgySession(id: string, wc: WebContents): void {
+  const spawnTime = Date.now()
+  let attempts = 0
+  const timer = setInterval(async () => {
+    attempts++
+    if (attempts > 40 || !sessions.has(id)) {
+      clearInterval(timer)
+      sessionTimers.delete(id)
+      return
+    }
+    try {
+      const names = await readdir(AGY_CONV_DIR)
+      const candidates: Array<{ sid: string; mtimeMs: number }> = []
+      for (const name of names) {
+        const m = name.match(/^(.+)\.(db|pb)$/)
+        if (!m || claimedSessions.has(m[1])) continue
+        const info = await stat(join(AGY_CONV_DIR, name)).catch(() => null)
+        if (info && info.mtimeMs >= spawnTime - 2000) candidates.push({ sid: m[1], mtimeMs: info.mtimeMs })
+      }
+      if (candidates.length > 0) {
+        candidates.sort((a, b) => a.mtimeMs - b.mtimeMs)
+        const sid = candidates[0].sid
+        claimedSessions.add(sid)
+        if (!wc.isDestroyed()) wc.send(`pty:session:${id}`, sid)
+        clearInterval(timer)
+        sessionTimers.delete(id)
+      }
+    } catch {
+      // agy aún no ha creado el directorio
     }
   }, 3000)
   sessionTimers.set(id, timer)
@@ -87,10 +134,15 @@ export function registerPtyHandlers(): void {
       const permEnv = applied.env
       let command = applied.command
       const isClaude = command?.startsWith('claude') ?? false
-      // Celda restaurada con sesión conocida: --resume exacto de ESA conversación.
+      const isAgy = command?.startsWith('agy') ?? false
+      // Celda restaurada con sesión conocida: resume exacto de ESA conversación.
       if (opts.resumeSession && isClaude) {
         claimedSessions.add(opts.resumeSession)
         command += ` --resume '${opts.resumeSession.replace(/'/g, '')}'`
+      }
+      if (opts.resumeSession && isAgy) {
+        claimedSessions.add(opts.resumeSession)
+        command += ` --conversation '${opts.resumeSession.replace(/'/g, '')}'`
       }
       const wc = event.sender
       const shellPath = defaultShell()
@@ -125,8 +177,9 @@ export function registerPtyHandlers(): void {
 
       if (command) proc.write(command + '\r')
 
-      // Sesión nueva de claude: detectar qué session id le corresponde a esta celda.
+      // Sesión nueva: detectar qué session/conversación le corresponde a esta celda.
       if (isClaude && !opts.resumeSession) trackClaudeSession(id, cwd, wc)
+      if (isAgy && !opts.resumeSession) trackAgySession(id, wc)
 
       return id
     }

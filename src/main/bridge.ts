@@ -424,14 +424,11 @@ export function registerBridge(getWindow: () => BrowserWindow | null): void {
   app.on('before-quit', () => server.close())
 }
 
-// Skill para Claude Code: enseña a los agentes a usar el puente.
+// Skill para los agentes: enseña a usar el puente. Se escribe donde la lee
+// cada CLI: ~/.claude/skills (Claude Code, y OpenCode es compatible) y como
+// plugin de Antigravity (~/.gemini/config/plugins/<n>/skills/<n>/SKILL.md).
 function writeDelegationSkill(): void {
-  try {
-    const dir = join(homedir(), '.claude', 'skills', 'bridge-cells')
-    mkdirSync(dir, { recursive: true })
-    writeFileSync(
-      join(dir, 'SKILL.md'),
-      `---
+  const skill = `---
 name: bridge-cells
 description: Orquestar los agentes de otras celdas de BridgeEditor — listar celdas, delegarles tareas, consultar terminales de Claude, ver el feed de actividad y abrir celdas nuevas con otro agente/modelo. Usar cuando el usuario pida delegar, coordinar u orquestar trabajo entre tabs/celdas del editor.
 ---
@@ -525,8 +522,34 @@ Si estás en una celda de chat, puedes proponer delegaciones escribiendo en tu
 respuesta: \`@delegate(2, "tarea para la celda 2")\` — el usuario verá un botón
 para aprobarla con un clic y el resultado te llegará como un turno nuevo.
 `
-    )
+
+  try {
+    const dir = join(homedir(), '.claude', 'skills', 'bridge-cells')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'SKILL.md'), skill)
   } catch {
     // sin permisos para escribir el skill: el puente sigue funcionando vía curl
+  }
+
+  try {
+    const pluginDir = join(homedir(), '.gemini', 'config', 'plugins', 'bridge-cells')
+    const skillDir = join(pluginDir, 'skills', 'bridge-cells')
+    mkdirSync(skillDir, { recursive: true })
+    writeFileSync(
+      join(pluginDir, 'plugin.json'),
+      JSON.stringify(
+        {
+          name: 'bridge-cells',
+          version: app.getVersion(),
+          description: 'Orquestación entre celdas de BridgeEditor',
+          author: { name: 'BridgeEditor' }
+        },
+        null,
+        2
+      )
+    )
+    writeFileSync(join(skillDir, 'SKILL.md'), skill)
+  } catch {
+    // antigravity no instalado o sin permisos: claude/opencode siguen con su copia
   }
 }

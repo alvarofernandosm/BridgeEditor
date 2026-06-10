@@ -83,7 +83,7 @@ export function ChatView({
   onAttention
 }: ChatViewProps): JSX.Element {
   const [messages, setMessages] = useState<ChatMsg[]>(() =>
-    sessionId && agent === 'claude'
+    sessionId && (agent === 'claude' || agent === 'antigravity')
       ? [{ role: 'meta', text: 'continuando la sesión anterior' }]
       : []
   )

@@ -313,21 +313,27 @@ function TerminalView({
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.code === 'KeyA') return false
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.code === 'KeyD') return false
       if (e.type !== 'keydown') return true
-      // Atajos estándar de terminal: Ctrl+Shift+C/V (Ctrl+C solo sigue siendo SIGINT)
+      // Atajos estándar de terminal: Ctrl+Shift+C/V (Ctrl+C solo sigue siendo SIGINT).
+      // preventDefault es clave: Chromium también trae Ctrl+Shift+V nativo
+      // (pegar sin formato) y sin cancelarlo el texto se pegaba DOBLE.
       if (e.ctrlKey && e.shiftKey && !e.altKey && e.code === 'KeyC') {
+        e.preventDefault()
         copySelection()
         return false
       }
       if (e.ctrlKey && e.shiftKey && !e.altKey && e.code === 'KeyV') {
+        e.preventDefault()
         pasteClipboard()
         return false
       }
       // macOS: Cmd+C copia si hay selección (sin selección pasa al TUI), Cmd+V pega
       if (e.metaKey && !e.ctrlKey && e.code === 'KeyC' && term.hasSelection()) {
+        e.preventDefault()
         copySelection()
         return false
       }
       if (e.metaKey && !e.ctrlKey && e.code === 'KeyV') {
+        e.preventDefault()
         pasteClipboard()
         return false
       }
