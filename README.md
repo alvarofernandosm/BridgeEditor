@@ -132,9 +132,11 @@ mezclar chats, terminales y visores en la misma grilla.
   respeta el modelo elegido de cada celda.
 - `Enter` envía, `Shift+Enter` hace salto de línea, y hay botón Cancelar
   mientras el agente trabaja.
-- En Claude, el **razonamiento** (extended thinking) aparece como bloque
-  colapsable 🧠, y cada turno cierra con costo, duración y **tokens**
-  (`$0.0123 · 14s · ↑12.3k ↓456 tok`).
+- El **razonamiento** (extended thinking) aparece como bloque colapsable 🧠 y
+  cada turno cierra con costo, duración y **tokens**
+  (`$0.0123 · 14s · ↑12.3k ↓456 tok`) — en Claude (stream-json) y en OpenCode
+  (`--format json`, que además da markdown renderizado, chips de herramientas
+  y session id real para el resume exacto por celda).
 - **Slash commands del chat**: `/resume` abre un selector visual de sesiones
   anteriores del directorio (botón ↺ también), `/continue` retoma la más
   reciente, `/new` empieza conversación nueva y `/help` muestra la ayuda.

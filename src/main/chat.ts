@@ -44,9 +44,52 @@ function buildCommand(opts: ChatSendOpts): string {
     else flags.push('--permission-mode', 'acceptEdits')
     return `claude ${flags.join(' ')}`
   }
-  const cont = opts.sessionId ? '--continue ' : ''
+  // 'continue' es el marcador legado (antes de rastrear el sessionID real)
+  const session = opts.sessionId
+    ? opts.sessionId === 'continue'
+      ? '--continue '
+      : `--session ${shellQuote(opts.sessionId)} `
+    : ''
   const model = opts.model ? `--model ${shellQuote(opts.model)} ` : ''
-  return `opencode run ${cont}${model}${shellQuote(opts.message)}`
+  return `opencode run --format json ${session}${model}${shellQuote(opts.message)}`
+}
+
+const fmtTokens = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))
+
+/** Acumulado de un turno de opencode (eventos --format json). */
+interface OpencodeTurnState {
+  session: string | null
+  cost: number
+  tokensIn: number
+  tokensOut: number
+  sentTools: Set<string>
+}
+
+function handleOpencodeEvent(ev: any, state: OpencodeTurnState, send: SendFn): void {
+  if (typeof ev.sessionID === 'string') state.session = ev.sessionID
+  const part = ev.part ?? {}
+  if (ev.type === 'text' && typeof part.text === 'string' && part.text.trim()) {
+    send({ kind: 'text', text: part.text })
+  } else if (ev.type === 'reasoning' && typeof part.text === 'string' && part.text.trim()) {
+    send({ kind: 'thinking', text: part.text })
+  } else if (ev.type === 'tool') {
+    if (part.state?.status && part.state.status !== 'completed') return
+    const id = String(part.id ?? Math.random())
+    if (state.sentTools.has(id)) return
+    state.sentTools.add(id)
+    const input = part.state?.input ?? {}
+    const detail =
+      input.command ?? input.filePath ?? input.path ?? input.pattern ?? input.url ?? ''
+    send({ kind: 'tool', name: String(part.tool ?? 'tool'), detail: String(detail).slice(0, 140) })
+  } else if (ev.type === 'step_finish') {
+    if (typeof part.cost === 'number') state.cost += part.cost
+    const tokens = part.tokens
+    if (tokens) {
+      state.tokensIn =
+        (tokens.input ?? 0) + (tokens.cache?.read ?? 0) + (tokens.cache?.write ?? 0)
+      state.tokensOut += tokens.output ?? 0
+    }
+  }
 }
 
 // Lista de modelos por agente: claude usa sus alias; opencode los expone con
@@ -111,7 +154,6 @@ function handleClaudeEvent(ev: any, send: SendFn, markResult: () => void): void 
     }
   } else if (ev.type === 'result') {
     markResult()
-    const fmtTokens = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))
     const parts: string[] = []
     if (ev.total_cost_usd != null) parts.push(`$${Number(ev.total_cost_usd).toFixed(4)}`)
     if (ev.duration_ms != null) parts.push(`${Math.round(ev.duration_ms / 1000)}s`)
@@ -190,18 +232,32 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
     let buf = ''
     let stderrTail = ''
     let gotResult = false
+    const startTime = Date.now()
+    const ocState: OpencodeTurnState = {
+      session: null,
+      cost: 0,
+      tokensIn: 0,
+      tokensOut: 0,
+      sentTools: new Set()
+    }
 
     child.stdout.on('data', (d: Buffer) => {
-      if (opts.agent === 'opencode') {
-        send({ kind: 'chunk', text: stripAnsi(d.toString()) })
-        return
-      }
       buf += d.toString()
       let nl: number
       while ((nl = buf.indexOf('\n')) >= 0) {
         const line = buf.slice(0, nl).trim()
         buf = buf.slice(nl + 1)
         if (!line) continue
+        if (opts.agent === 'opencode') {
+          try {
+            handleOpencodeEvent(JSON.parse(line), ocState, send)
+          } catch {
+            // versión vieja de opencode sin --format json: degradar a texto plano
+            const clean = stripAnsi(line)
+            if (clean.trim()) send({ kind: 'chunk', text: clean + '\n' })
+          }
+          continue
+        }
         try {
           handleClaudeEvent(JSON.parse(line), send, () => {
             gotResult = true
@@ -225,10 +281,16 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
     child.on('close', (code) => {
       running.delete(opts.id)
       if (opts.agent === 'opencode') {
+        const metaParts: string[] = []
+        if (ocState.cost > 0) metaParts.push(`$${ocState.cost.toFixed(4)}`)
+        metaParts.push(`${Math.round((Date.now() - startTime) / 1000)}s`)
+        if (ocState.tokensIn > 0 || ocState.tokensOut > 0) {
+          metaParts.push(`↑${fmtTokens(ocState.tokensIn)} ↓${fmtTokens(ocState.tokensOut)} tok`)
+        }
         send({
           kind: 'done',
-          sessionId: 'continue',
-          meta: null,
+          sessionId: ocState.session ?? 'continue',
+          meta: metaParts.join(' · '),
           error: code ? stderrTail || `código ${code}` : null
         })
       } else if (!gotResult) {
