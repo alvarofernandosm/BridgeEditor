@@ -54,6 +54,9 @@ export function Launcher({ onStart, onOpenFile }: LauncherProps): JSX.Element {
           <button className="agent-btn opencode" onClick={() => start('opencode')}>
             ⌬ OpenCode
           </button>
+          <button className="agent-btn antigravity" onClick={() => start('antigravity')}>
+            ☄ Antigravity
+          </button>
           <button className="agent-btn shell" onClick={() => start('shell')}>
             $ Shell
           </button>
@@ -67,6 +70,9 @@ export function Launcher({ onStart, onOpenFile }: LauncherProps): JSX.Element {
           </button>
           <button className="agent-btn opencode" onClick={() => start('opencode', 'chat')}>
             💬 OpenCode
+          </button>
+          <button className="agent-btn antigravity" onClick={() => start('antigravity', 'chat')}>
+            💬 Antigravity
           </button>
         </div>
       </div>

@@ -31,7 +31,7 @@ declare global {
       onMenuAction(cb: (action: string) => void): () => void
       chatSend(opts: {
         id: string
-        agent: 'claude' | 'opencode'
+        agent: 'claude' | 'opencode' | 'antigravity'
         cwd: string
         message: string
         sessionId: string | null
@@ -39,7 +39,7 @@ declare global {
         model?: string | null
         effort?: string | null
       }): Promise<void>
-      chatModels(agent: 'claude' | 'opencode'): Promise<string[]>
+      chatModels(agent: 'claude' | 'opencode' | 'antigravity'): Promise<string[]>
       chatCancel(id: string): void
       chatSessions(cwd: string): Promise<Array<{ id: string; mtimeMs: number; summary: string }>>
       onChatEvent(id: string, cb: (ev: ChatEvent) => void): () => void
@@ -52,7 +52,7 @@ declare global {
       onOpenCellRequest(
         cb: (spec: {
           requestId: string
-          agent: 'claude' | 'opencode'
+          agent: 'claude' | 'opencode' | 'antigravity'
           model: string | null
           effort: string | null
           cwd: string

@@ -1,8 +1,9 @@
 # BridgeEditor
 
 IDE agéntico minimalista: una grilla dinámica de hasta 6 terminales (3×2) donde cada
-celda corre **Claude Code**, **OpenCode** o un shell libre. Pensado para supervisar
-varios agentes trabajando en paralelo sobre repos o worktrees distintos.
+celda corre **Claude Code**, **OpenCode**, **Antigravity** (CLI `agy`) o un shell
+libre. Pensado para supervisar varios agentes trabajando en paralelo sobre repos o
+worktrees distintos.
 
 ## Instalación
 
@@ -125,9 +126,16 @@ termina puedes relanzarlo, cambiar de agente o cerrar la celda.
 
 ## Chat agéntico (estilo Antigravity)
 
-Además de la terminal TUI, una celda puede ser un **chat** con Claude Code u
-OpenCode (sección "Chat agéntico" del launcher). Es **por celda**: puedes
-mezclar chats, terminales y visores en la misma grilla.
+Además de la terminal TUI, una celda puede ser un **chat** con Claude Code,
+OpenCode o Antigravity (sección "Chat agéntico" del launcher). Es **por
+celda**: puedes mezclar chats, terminales y visores en la misma grilla.
+
+Particularidades de **Antigravity** (`agy`): los modelos llevan el effort en
+el nombre ("Gemini 3.5 Flash (High)", "Claude Sonnet 4.6 (Thinking)"…), así
+que no hay selector de effort aparte; su modo print no expone tokens/costo
+(solo duración); y la conversación continúa entre turnos pero **no se retoma
+tras reiniciar la app** (su CLI reimprime el historial completo en cada
+respuesta — el filtrado vive en memoria).
 
 - Por debajo corre el modo headless (`claude -p --output-format stream-json`,
   `opencode run`); por encima ves burbujas, **markdown renderizado**, chips de

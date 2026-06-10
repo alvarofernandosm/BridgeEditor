@@ -53,9 +53,11 @@ const COMPACT_PROMPT =
   'con el resumen.'
 
 // Niveles de razonamiento por agente: claude --effort / opencode --variant.
-const EFFORT_OPTIONS: Record<'claude' | 'opencode', string[]> = {
+// antigravity no tiene flag aparte: el effort va dentro del nombre del modelo.
+const EFFORT_OPTIONS: Record<'claude' | 'opencode' | 'antigravity', string[]> = {
   claude: ['low', 'medium', 'high', 'xhigh', 'max'],
-  opencode: ['minimal', 'low', 'medium', 'high', 'max']
+  opencode: ['minimal', 'low', 'medium', 'high', 'max'],
+  antigravity: []
 }
 
 const PERM_LABELS: Record<ChatPerm, string> = {
@@ -511,19 +513,21 @@ export function ChatView({
             ))}
           </select>
         )}
-        <select
-          className="chat-model"
-          value={effort ?? ''}
-          title="Nivel de razonamiento (claude --effort / opencode --variant)"
-          onChange={(e) => onEffort(e.target.value || null)}
-        >
-          <option value="">effort auto</option>
-          {EFFORT_OPTIONS[agent].map((ef) => (
-            <option key={ef} value={ef}>
-              effort {ef}
-            </option>
-          ))}
-        </select>
+        {EFFORT_OPTIONS[agent].length > 0 && (
+          <select
+            className="chat-model"
+            value={effort ?? ''}
+            title="Nivel de razonamiento (claude --effort / opencode --variant)"
+            onChange={(e) => onEffort(e.target.value || null)}
+          >
+            <option value="">effort auto</option>
+            {EFFORT_OPTIONS[agent].map((ef) => (
+              <option key={ef} value={ef}>
+                effort {ef}
+              </option>
+            ))}
+          </select>
+        )}
         <textarea
           ref={inputRef}
           value={input}

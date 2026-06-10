@@ -18,7 +18,7 @@ const shellQuote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`
 
 export interface ChatSendOpts {
   id: string
-  agent: 'claude' | 'opencode'
+  agent: 'claude' | 'opencode' | 'antigravity'
   cwd: string
   message: string
   sessionId: string | null
@@ -36,6 +36,15 @@ export interface ChatTurnResult {
 }
 
 function buildCommand(opts: ChatSendOpts): string {
+  if (opts.agent === 'antigravity') {
+    // agy -p: print no-interactivo. No hay salida JSON: el texto plano se
+    // procesa en el close (la salida reimprime el historial; ver agyTranscripts).
+    const flags = ['-p', shellQuote(opts.message), '--print-timeout', '15m']
+    if (opts.model) flags.push('--model', shellQuote(opts.model))
+    if (opts.sessionId) flags.push('--conversation', shellQuote(opts.sessionId))
+    if (opts.permissionMode === 'full') flags.push('--dangerously-skip-permissions')
+    return `agy ${flags.join(' ')}`
+  }
   if (opts.agent === 'claude') {
     const flags = ['-p', shellQuote(opts.message), '--output-format', 'stream-json', '--verbose']
     if (opts.model) flags.push('--model', shellQuote(opts.model))
@@ -97,18 +106,17 @@ function handleOpencodeEvent(ev: any, state: OpencodeTurnState, send: SendFn): v
   }
 }
 
-// Lista de modelos por agente: claude usa sus alias; opencode los expone con
-// `opencode models` (provider/model). Se cachea por arranque.
-let opencodeModelsCache: string[] | null = null
+// Lista de modelos por agente: claude usa sus alias; opencode y antigravity
+// los exponen con su subcomando `models`. Se cachea por arranque.
+const modelsCache = new Map<string, string[]>()
 
-export async function listChatModels(agent: 'claude' | 'opencode'): Promise<string[]> {
-  if (agent === 'claude') return ['fable', 'opus', 'sonnet', 'haiku']
-  if (opencodeModelsCache) return opencodeModelsCache
+function runModelsCommand(cmd: string, parse: (out: string) => string[]): Promise<string[]> {
+  if (modelsCache.has(cmd)) return Promise.resolve(modelsCache.get(cmd)!)
   return new Promise((resolve) => {
     const child =
       process.platform === 'win32'
-        ? spawn('opencode models', { shell: true, stdio: ['ignore', 'pipe', 'pipe'] })
-        : spawn(process.env.SHELL || '/bin/bash', ['-ilc', 'opencode models'], {
+        ? spawn(cmd, { shell: true, stdio: ['ignore', 'pipe', 'pipe'] })
+        : spawn(process.env.SHELL || '/bin/bash', ['-ilc', cmd], {
             stdio: ['ignore', 'pipe', 'pipe']
           })
     let out = ''
@@ -119,11 +127,8 @@ export async function listChatModels(agent: 'claude' | 'opencode'): Promise<stri
     child.stdout?.on('data', (d: Buffer) => (out += d.toString()))
     child.on('close', () => {
       clearTimeout(timer)
-      const models = stripAnsi(out)
-        .split('\n')
-        .map((l) => l.trim())
-        .filter((l) => l.includes('/') && !l.includes(' '))
-      if (models.length > 0) opencodeModelsCache = models
+      const models = parse(stripAnsi(out))
+      if (models.length > 0) modelsCache.set(cmd, models)
       resolve(models)
     })
     child.on('error', () => {
@@ -131,6 +136,27 @@ export async function listChatModels(agent: 'claude' | 'opencode'): Promise<stri
       resolve([])
     })
   })
+}
+
+export async function listChatModels(
+  agent: 'claude' | 'opencode' | 'antigravity'
+): Promise<string[]> {
+  if (agent === 'claude') return ['fable', 'opus', 'sonnet', 'haiku']
+  if (agent === 'antigravity') {
+    // nombres con espacios y "(Effort)" — el effort va dentro del modelo
+    return runModelsCommand('agy models', (out) =>
+      out
+        .split('\n')
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0 && !l.startsWith('Usage') && !l.startsWith('-'))
+    )
+  }
+  return runModelsCommand('opencode models', (out) =>
+    out
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.includes('/') && !l.includes(' '))
+  )
 }
 
 type SendFn = (payload: unknown) => void
@@ -183,6 +209,34 @@ function handleClaudeEvent(ev: any, send: SendFn, markResult: () => void): void 
 const stripAnsi = (s: string): string =>
   // eslint-disable-next-line no-control-regex
   s.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
+
+// --- Antigravity (agy) ---
+// Su modo print reimprime TODO el historial de la conversación y agrega la
+// respuesta nueva al final. Guardamos la salida acumulada por conversación
+// (solo en memoria: por eso los chats de agy no se retoman entre reinicios)
+// y la respuesta del turno es el sufijo que aparece después del prefijo conocido.
+const agyTranscripts = new Map<string, string>()
+const AGY_CONV_DIR = join(homedir(), '.gemini', 'antigravity-cli', 'conversations')
+
+// El id de una conversación nueva es el nombre del archivo .db/.pb más
+// reciente en el directorio de conversaciones (mismo truco que el rastreo
+// de sesiones de claude por celda).
+async function latestAgyConversation(sinceMs: number): Promise<string | null> {
+  try {
+    const names = await readdir(AGY_CONV_DIR)
+    let best: { id: string; mtime: number } | null = null
+    for (const name of names) {
+      const m = name.match(/^(.+)\.(db|pb)$/)
+      if (!m) continue
+      const st = await stat(join(AGY_CONV_DIR, name)).catch(() => null)
+      if (!st || st.mtimeMs < sinceMs - 2000) continue
+      if (!best || st.mtimeMs > best.mtime) best = { id: m[1], mtime: st.mtimeMs }
+    }
+    return best?.id ?? null
+  } catch {
+    return null
+  }
+}
 
 /**
  * Ejecuta un turno headless y emite los eventos normalizados por `emit`.
@@ -246,7 +300,13 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
       sentTools: new Set()
     }
 
+    let agyOut = ''
     child.stdout.on('data', (d: Buffer) => {
+      if (opts.agent === 'antigravity') {
+        // texto plano acumulativo: se procesa completo en el close
+        agyOut += d.toString()
+        return
+      }
       buf += d.toString()
       let nl: number
       while ((nl = buf.indexOf('\n')) >= 0) {
@@ -283,8 +343,26 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
       stderrTail = (stderrTail + clean).slice(-2000)
     })
 
-    child.on('close', (code) => {
+    child.on('close', async (code) => {
       running.delete(opts.id)
+      if (opts.agent === 'antigravity') {
+        const full = stripAnsi(agyOut).trim()
+        // conversación: la conocida, o la recién creada por este turno
+        const convId = opts.sessionId ?? (await latestAgyConversation(startTime))
+        const prev = opts.sessionId ? (agyTranscripts.get(opts.sessionId) ?? '') : ''
+        let text = full
+        if (prev && full.startsWith(prev)) text = full.slice(prev.length).trim()
+        if (convId) agyTranscripts.set(convId, full)
+        if (text) send({ kind: 'text', text })
+        send({
+          kind: 'done',
+          sessionId: convId,
+          meta: `${Math.round((Date.now() - startTime) / 1000)}s`,
+          error: code ? stripAnsi(stderrTail) || `agy terminó con código ${code}` : null
+        })
+        resolveTurn({ text: collected.join('\n\n').trim(), error: finalError, sessionId: finalSession })
+        return
+      }
       if (opts.agent === 'opencode') {
         const metaParts: string[] = []
         if (ocState.cost > 0) metaParts.push(`$${ocState.cost.toFixed(4)}`)

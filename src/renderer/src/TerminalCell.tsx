@@ -12,6 +12,7 @@ import { ChatView } from './ChatView'
 export const AGENTS: Record<AgentKind, { label: string; command: string | null; color: string }> = {
   claude: { label: 'Claude Code', command: 'claude', color: '#d97757' },
   opencode: { label: 'OpenCode', command: 'opencode', color: '#4ec9b0' },
+  antigravity: { label: 'Antigravity', command: 'agy', color: '#8ab4f8' },
   shell: { label: 'Shell', command: null, color: '#9cdcfe' }
 }
 

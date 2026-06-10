@@ -29,7 +29,7 @@ const api = {
 
   chatSend: (opts: {
     id: string
-    agent: 'claude' | 'opencode'
+    agent: 'claude' | 'opencode' | 'antigravity'
     cwd: string
     message: string
     sessionId: string | null
@@ -38,7 +38,7 @@ const api = {
     effort?: string | null
   }): Promise<void> => ipcRenderer.invoke('chat:send', opts),
 
-  chatModels: (agent: 'claude' | 'opencode'): Promise<string[]> =>
+  chatModels: (agent: 'claude' | 'opencode' | 'antigravity'): Promise<string[]> =>
     ipcRenderer.invoke('chat:models', agent),
 
   chatCancel: (id: string): void => ipcRenderer.send('chat:cancel', { id }),
@@ -68,7 +68,7 @@ const api = {
   onOpenCellRequest: (
     cb: (spec: {
       requestId: string
-      agent: 'claude' | 'opencode'
+      agent: 'claude' | 'opencode' | 'antigravity'
       model: string | null
       effort: string | null
       cwd: string
@@ -78,7 +78,7 @@ const api = {
       _event: unknown,
       spec: {
         requestId: string
-        agent: 'claude' | 'opencode'
+        agent: 'claude' | 'opencode' | 'antigravity'
         model: string | null
         effort: string | null
         cwd: string

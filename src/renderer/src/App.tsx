@@ -3,7 +3,7 @@ import { Grid } from './Grid'
 import { Palette, type PaletteCommand } from './Palette'
 import { AGENTS } from './TerminalCell'
 
-export type AgentKind = 'claude' | 'opencode' | 'shell'
+export type AgentKind = 'claude' | 'opencode' | 'antigravity' | 'shell'
 export type PermLevel = 'default' | 'flexible' | 'yolo'
 
 export interface CellState {
@@ -58,7 +58,7 @@ const newCell = (): CellState => ({
 })
 
 const STORAGE_KEY = 'bridge-editor.layout.v1'
-const AGENT_KINDS: AgentKind[] = ['claude', 'opencode', 'shell']
+const AGENT_KINDS: AgentKind[] = ['claude', 'opencode', 'antigravity', 'shell']
 
 interface SavedCell {
   agent: AgentKind | null
@@ -85,7 +85,12 @@ function cellsFromSaved(saved: SavedCell[], withSessions: boolean): CellState[] 
       perm: s.perm === 'flexible' || s.perm === 'yolo' ? s.perm : 'default',
       resume: withSessions && agent !== null && agent !== 'shell' && s.mode !== 'chat',
       termSessionId: withSessions && typeof s.termSessionId === 'string' ? s.termSessionId : null,
-      chatSessionId: withSessions && typeof s.chatSessionId === 'string' ? s.chatSessionId : null,
+      // antigravity no retoma chats entre reinicios: su modo print reimprime
+      // el historial completo y el tracker de sufijos vive en memoria del main.
+      chatSessionId:
+        withSessions && typeof s.chatSessionId === 'string' && agent !== 'antigravity'
+          ? s.chatSessionId
+          : null,
       chatModel: typeof s.chatModel === 'string' ? s.chatModel : null,
       chatEffort: typeof s.chatEffort === 'string' ? s.chatEffort : null,
       file,

@@ -18,7 +18,7 @@ interface CellInfo {
   id: string
   index: number
   label: string
-  agent: 'claude' | 'opencode' | 'shell' | null
+  agent: 'claude' | 'opencode' | 'antigravity' | 'shell' | null
   mode: 'term' | 'chat'
   cwd: string
   perm: 'default' | 'flexible' | 'yolo'
@@ -173,7 +173,7 @@ async function delegateToCell(params: {
       const result = await executeChatTurn(
         {
           id: target.id,
-          agent: target.agent as 'claude' | 'opencode',
+          agent: target.agent as 'claude' | 'opencode' | 'antigravity',
           cwd: target.cwd,
           message: params.message,
           sessionId: params.fresh ? null : target.chatSessionId,
@@ -217,7 +217,7 @@ async function delegateToCell(params: {
 const openRequests = new Map<string, (cellId: string | null) => void>()
 
 function requestOpenCell(spec: {
-  agent: 'claude' | 'opencode'
+  agent: 'claude' | 'opencode' | 'antigravity'
   model: string | null
   effort: string | null
   cwd: string
@@ -362,8 +362,13 @@ export function registerBridge(getWindow: () => BrowserWindow | null): void {
       } catch {
         return json(res, 400, { error: 'JSON inválido' })
       }
-      const agent = body.agent === 'claude' || body.agent === 'opencode' ? body.agent : null
-      if (!agent) return json(res, 400, { error: 'agent debe ser "claude" u "opencode"' })
+      const agent =
+        body.agent === 'claude' || body.agent === 'opencode' || body.agent === 'antigravity'
+          ? body.agent
+          : null
+      if (!agent) {
+        return json(res, 400, { error: 'agent debe ser "claude", "opencode" o "antigravity"' })
+      }
       if (registry.length >= MAX_CELLS) return json(res, 409, { error: 'la grilla está llena (6 celdas)' })
 
       const fromLabel = fromLabelOf(body.from)
@@ -498,10 +503,13 @@ curl -s -X POST "$BRIDGE_API/open-cell" \\
   -d "{\\"agent\\": \\"opencode\\", \\"model\\": \\"opencode-go/kimi-k2.6\\", \\"effort\\": \\"high\\", \\"cwd\\": \\"/ruta/proyecto\\", \\"message\\": \\"<primera tarea (opcional)>\\", \\"from\\": \\"$BRIDGE_CELL_ID\\"}"
 \`\`\`
 
-\`effort\` es opcional (nivel de razonamiento): para claude \`low|medium|high|\`
-\`xhigh|max\`; para opencode es el variant del proveedor (\`minimal|high|max\`…).
-Los modelos de opencode se listan con \`opencode models\`; los de claude son sus
-alias (\`fable\`, \`opus\`, \`sonnet\`, \`haiku\`).
+\`agent\` puede ser \`claude\`, \`opencode\` o \`antigravity\` (CLI \`agy\`: Gemini,
+Claude y GPT vía Antigravity). \`effort\` es opcional (nivel de razonamiento):
+para claude \`low|medium|high|xhigh|max\`; para opencode es el variant del
+proveedor (\`minimal|high|max\`…); antigravity NO usa effort aparte — va dentro
+del nombre del modelo (p. ej. \`"Gemini 3.5 Flash (High)"\`). Los modelos se
+listan con \`opencode models\` / \`agy models\`; los de claude son sus alias
+(\`fable\`, \`opus\`, \`sonnet\`, \`haiku\`).
 
 ## Feed de actividad (qué ha pasado en las demás celdas)
 

@@ -107,5 +107,12 @@ export function applyPermissions(
     return { command, env: { OPENCODE_PERMISSION: JSON.stringify(permission) } }
   }
 
+  if (command === 'agy') {
+    // antigravity no tiene preset granular: flexible se queda en el default
+    // (auto-aprueba dentro del workspace, pregunta lo demás).
+    if (perm === 'yolo') return { command: 'agy --dangerously-skip-permissions', env: {} }
+    return { command, env: {} }
+  }
+
   return { command, env: {} }
 }

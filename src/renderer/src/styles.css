@@ -383,6 +383,10 @@ body {
   border-color: #4ec9b0;
 }
 
+.agent-btn.antigravity:hover {
+  border-color: #8ab4f8;
+}
+
 .agent-btn.shell:hover {
   border-color: var(--accent);
 }
