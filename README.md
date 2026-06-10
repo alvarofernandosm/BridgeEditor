@@ -40,6 +40,8 @@ Arranca con 1 celda. Con **+ Nueva celda** la grilla se divide sola:
 | 6 | 3×2 |
 
 Al cerrar una celda la grilla se reacomoda. `Ctrl/Cmd+1…6` salta entre celdas.
+**Arrastra el header de una celda y suéltalo sobre otra para intercambiar sus
+posiciones** — las terminales siguen corriendo durante el movimiento.
 El layout se guarda solo: al reabrir la app, las celdas de archivo se reabren y
 las de agente relanzan su comando en el mismo directorio. Para Claude Code,
 BridgeEditor detecta el **session id propio de cada celda** (vigilando qué

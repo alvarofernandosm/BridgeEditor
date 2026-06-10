@@ -181,6 +181,18 @@ export default function App(): JSX.Element {
     )
   }, [])
 
+  // Drag & drop de headers: intercambia la posición de dos celdas.
+  const swapCells = useCallback((idA: string, idB: string) => {
+    setCells((cs) => {
+      const ia = cs.findIndex((c) => c.id === idA)
+      const ib = cs.findIndex((c) => c.id === idB)
+      if (ia < 0 || ib < 0 || ia === ib) return cs
+      const next = [...cs]
+      ;[next[ia], next[ib]] = [next[ib], next[ia]]
+      return next
+    })
+  }, [])
+
   // Ctrl+Shift+A / Ctrl+Shift+D: elegir archivo/directorio y pegar su ruta
   // (entre comillas si hace falta) en la terminal o el chat de la celda activa.
   // Se usan combos con Shift porque los TUI no los distinguen de Ctrl+letra:
@@ -332,6 +344,7 @@ export default function App(): JSX.Element {
         onClose={closeCell}
         onUpdate={updateCell}
         onOpenFile={openFileInCell}
+        onSwap={swapCells}
       />
       {paletteOpen && <Palette commands={paletteCommands} onClose={() => setPaletteOpen(false)} />}
     </div>

@@ -1,6 +1,7 @@
-import type { CSSProperties } from 'react'
+import { useState, type CSSProperties } from 'react'
 import type { CellState } from './App'
 import { TerminalCell } from './TerminalCell'
+import { CELL_MIME } from './dnd'
 
 interface GridProps {
   cells: CellState[]
@@ -9,6 +10,7 @@ interface GridProps {
   onClose: (id: string) => void
   onUpdate: (id: string, patch: Partial<CellState>) => void
   onOpenFile: (path: string) => void
+  onSwap: (idA: string, idB: string) => void
 }
 
 /**
@@ -45,13 +47,34 @@ export function Grid({
   onActivate,
   onClose,
   onUpdate,
-  onOpenFile
+  onOpenFile,
+  onSwap
 }: GridProps): JSX.Element {
   const n = cells.length
+  const [dropTargetId, setDropTargetId] = useState<string | null>(null)
+
   return (
     <div className="grid" style={gridStyle(n)}>
       {cells.map((cell, i) => (
-        <div key={cell.id} className="grid-item" style={itemStyle(n, i)}>
+        <div
+          key={cell.id}
+          className={`grid-item ${dropTargetId === cell.id ? 'grid-item-drop' : ''}`}
+          style={itemStyle(n, i)}
+          onDragOver={(e) => {
+            if (!e.dataTransfer.types.includes(CELL_MIME)) return
+            e.preventDefault()
+            e.dataTransfer.dropEffect = 'move'
+            setDropTargetId(cell.id)
+          }}
+          onDragLeave={() => setDropTargetId((cur) => (cur === cell.id ? null : cur))}
+          onDrop={(e) => {
+            setDropTargetId(null)
+            const sourceId = e.dataTransfer.getData(CELL_MIME)
+            if (!sourceId || sourceId === cell.id) return
+            e.preventDefault()
+            onSwap(sourceId, cell.id)
+          }}
+        >
           <TerminalCell
             cell={cell}
             index={i}

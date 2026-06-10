@@ -4,6 +4,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import '@xterm/xterm/css/xterm.css'
 import type { AgentKind, CellState } from './App'
+import { CELL_MIME } from './dnd'
 import { Launcher } from './Launcher'
 import { FileView } from './FileView'
 import { ChatView } from './ChatView'
@@ -49,7 +50,15 @@ export function TerminalCell({
       className={`cell ${active ? 'cell-active' : ''} ${cell.attention ? 'cell-attention' : ''}`}
       onMouseDown={() => onActivate(cell.id)}
     >
-      <header className="cell-header">
+      <header
+        className="cell-header"
+        title="Arrastra para intercambiar la posición con otra celda"
+        draggable
+        onDragStart={(e) => {
+          e.dataTransfer.setData(CELL_MIME, cell.id)
+          e.dataTransfer.effectAllowed = 'move'
+        }}
+      >
         <span className="cell-index">{index + 1}</span>
         {cell.status === 'file' && cell.file ? (
           <>
@@ -113,9 +122,11 @@ export function TerminalCell({
       <div
         className="cell-body"
         onDragOver={(e) => {
+          if (e.dataTransfer.types.includes(CELL_MIME)) return
           if (cell.status === 'launcher' || cell.status === 'file') e.preventDefault()
         }}
         onDrop={(e) => {
+          if (e.dataTransfer.types.includes(CELL_MIME)) return
           if (cell.status !== 'launcher' && cell.status !== 'file') return
           e.preventDefault()
           const dropped = e.dataTransfer.files[0]
@@ -497,12 +508,15 @@ function TerminalView({
       ref={containerRef}
       className={`term-container ${dragOver ? 'drop-target' : ''}`}
       onDragOver={(e) => {
+        // el drag de celdas pasa de largo hacia el grid-item (intercambio)
+        if (e.dataTransfer.types.includes(CELL_MIME)) return
         e.preventDefault()
         e.dataTransfer.dropEffect = 'copy'
         setDragOver(true)
       }}
       onDragLeave={() => setDragOver(false)}
       onDrop={(e) => {
+        if (e.dataTransfer.types.includes(CELL_MIME)) return
         e.preventDefault()
         setDragOver(false)
         const paths = Array.from(e.dataTransfer.files)
