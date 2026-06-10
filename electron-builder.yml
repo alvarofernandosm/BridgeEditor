@@ -1,0 +1,31 @@
+appId: com.moadw.bridgeeditor
+productName: BridgeEditor
+directories:
+  output: release
+files:
+  - out/**
+  - '!src/**'
+  - '!electron.vite.config.ts'
+  - '!{tsconfig.json,README.md,.gitignore}'
+asarUnpack:
+  - '**/node_modules/node-pty/**'
+extraResources:
+  - from: build/icon.png
+    to: icon.png
+npmRebuild: true
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Development
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - dmg
+win:
+  executableName: BridgeEditor
+  target:
+    - nsis
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true

@@ -1,0 +1,480 @@
+import { useEffect, useRef, useState } from 'react'
+import { Terminal, type ILink } from '@xterm/xterm'
+import { FitAddon } from '@xterm/addon-fit'
+import { WebLinksAddon } from '@xterm/addon-web-links'
+import '@xterm/xterm/css/xterm.css'
+import type { AgentKind, CellState } from './App'
+import { Launcher } from './Launcher'
+import { FileView } from './FileView'
+import { ChatView } from './ChatView'
+
+export const AGENTS: Record<AgentKind, { label: string; command: string | null; color: string }> = {
+  claude: { label: 'Claude Code', command: 'claude', color: '#d97757' },
+  opencode: { label: 'OpenCode', command: 'opencode', color: '#4ec9b0' },
+  shell: { label: 'Shell', command: null, color: '#9cdcfe' }
+}
+
+interface TerminalCellProps {
+  cell: CellState
+  index: number
+  active: boolean
+  onActivate: (id: string) => void
+  onClose: (id: string) => void
+  onUpdate: (id: string, patch: Partial<CellState>) => void
+  onOpenFile: (path: string) => void
+}
+
+export function TerminalCell({
+  cell,
+  index,
+  active,
+  onActivate,
+  onClose,
+  onUpdate,
+  onOpenFile
+}: TerminalCellProps): JSX.Element {
+  const agent = cell.agent ? AGENTS[cell.agent] : null
+  const ptyId = `${cell.id}-g${cell.generation}`
+  const dotColor =
+    cell.status !== 'running'
+      ? '#f85149'
+      : cell.attention
+        ? '#e3b341'
+        : cell.activity === 'working'
+          ? '#3fb950'
+          : '#58a6ff'
+
+  return (
+    <section
+      className={`cell ${active ? 'cell-active' : ''} ${cell.attention ? 'cell-attention' : ''}`}
+      onMouseDown={() => onActivate(cell.id)}
+    >
+      <header className="cell-header">
+        <span className="cell-index">{index + 1}</span>
+        {cell.status === 'file' && cell.file ? (
+          <>
+            <span className="cell-title" style={{ color: '#e3b341' }}>
+              📄 {cell.file.split(/[\\/]/).pop()}
+            </span>
+            <span className="cell-cwd" title={cell.file}>
+              {cell.file}
+            </span>
+          </>
+        ) : agent ? (
+          <>
+            <span
+              className={`status-dot ${cell.attention ? 'dot-pulse' : ''}`}
+              title={
+                cell.status !== 'running'
+                  ? 'terminado'
+                  : cell.attention
+                    ? 'esperándote'
+                    : cell.activity === 'working'
+                      ? 'trabajando'
+                      : 'quieto'
+              }
+              style={{ background: dotColor }}
+            />
+            <span className="cell-title" style={{ color: agent.color }}>
+              {cell.mode === 'chat' ? `💬 ${agent.label}` : agent.label}
+            </span>
+            <span className="cell-cwd" title={cell.cwd}>
+              {cell.cwd}
+            </span>
+          </>
+        ) : (
+          <span className="cell-title muted">nueva sesión</span>
+        )}
+        <div className="spacer" />
+        {cell.status === 'file' && (
+          <button
+            className="icon-btn"
+            title="Volver al launcher"
+            onClick={() => onUpdate(cell.id, { status: 'launcher', file: null })}
+          >
+            ↩
+          </button>
+        )}
+        <button
+          className="icon-btn"
+          title="Cerrar celda"
+          onClick={() => {
+            const busy =
+              cell.status === 'running' && (cell.mode === 'term' || cell.activity === 'working')
+            if (busy && !window.confirm('Esta celda tiene un proceso corriendo. ¿Cerrarla y terminarlo?')) {
+              return
+            }
+            onClose(cell.id)
+          }}
+        >
+          ✕
+        </button>
+      </header>
+      <div
+        className="cell-body"
+        onDragOver={(e) => {
+          if (cell.status === 'launcher' || cell.status === 'file') e.preventDefault()
+        }}
+        onDrop={(e) => {
+          if (cell.status !== 'launcher' && cell.status !== 'file') return
+          e.preventDefault()
+          const dropped = e.dataTransfer.files[0]
+          const path = dropped ? window.bridge.filePathFor(dropped) : null
+          if (path) onUpdate(cell.id, { status: 'file', file: path })
+        }}
+      >
+        {cell.status === 'launcher' && (
+          <Launcher
+            onStart={(kind, cwd, mode) =>
+              onUpdate(cell.id, {
+                agent: kind,
+                cwd,
+                mode,
+                chatSessionId: null,
+                status: 'running',
+                exitCode: undefined
+              })
+            }
+            onOpenFile={(path) => onUpdate(cell.id, { status: 'file', file: path })}
+          />
+        )}
+        {cell.status === 'file' && cell.file && <FileView cellId={cell.id} path={cell.file} />}
+        {cell.mode === 'chat' &&
+          cell.status === 'running' &&
+          cell.agent &&
+          cell.agent !== 'shell' && (
+            <ChatView
+              cellId={cell.id}
+              agent={cell.agent}
+              cwd={cell.cwd}
+              active={active}
+              sessionId={cell.chatSessionId}
+              onSessionId={(sid) => onUpdate(cell.id, { chatSessionId: sid })}
+              onActivity={(activity) => onUpdate(cell.id, { activity })}
+              onAttention={() => onUpdate(cell.id, { attention: true })}
+            />
+          )}
+        {cell.mode === 'term' && (cell.status === 'running' || cell.status === 'exited') && cell.agent && (
+          <TerminalView
+            key={ptyId}
+            ptyId={ptyId}
+            command={AGENTS[cell.agent].command}
+            cwd={cell.cwd}
+            active={active}
+            onExit={(code) => onUpdate(cell.id, { status: 'exited', exitCode: code })}
+            onActivity={(activity) => onUpdate(cell.id, { activity })}
+            onAttention={() => onUpdate(cell.id, { attention: true })}
+            onUserInput={() => {
+              if (cell.attention) onUpdate(cell.id, { attention: false })
+            }}
+            onOpenFile={onOpenFile}
+          />
+        )}
+        {cell.mode === 'term' && cell.status === 'exited' && (
+          <div className="exit-overlay">
+            <p>
+              Proceso terminado{cell.exitCode !== undefined ? ` (código ${cell.exitCode})` : ''}
+            </p>
+            <div className="exit-actions">
+              <button
+                onClick={() =>
+                  onUpdate(cell.id, { status: 'running', generation: cell.generation + 1 })
+                }
+              >
+                ↻ Relanzar
+              </button>
+              <button onClick={() => onUpdate(cell.id, { agent: null, status: 'launcher' })}>
+                Cambiar agente
+              </button>
+              <button onClick={() => onClose(cell.id)}>Cerrar celda</button>
+            </div>
+          </div>
+        )}
+      </div>
+    </section>
+  )
+}
+
+interface TerminalViewProps {
+  ptyId: string
+  command: string | null
+  cwd: string
+  active: boolean
+  onExit: (code: number) => void
+  onActivity: (activity: 'working' | 'idle') => void
+  onAttention: () => void
+  onUserInput: () => void
+  onOpenFile: (path: string) => void
+}
+
+/** Candidatos a ruta: absolutas, ~/, ./, ../ o relativas con extensión. */
+const PATH_RE = /(?:~|\.{1,2})?\/[\w.@+~/-]+|(?:[\w.@+-]+\/)+[\w.@+-]+\.[A-Za-z]\w*/g
+
+function TerminalView({
+  ptyId,
+  command,
+  cwd,
+  active,
+  onExit,
+  onActivity,
+  onAttention,
+  onUserInput,
+  onOpenFile
+}: TerminalViewProps): JSX.Element {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const termRef = useRef<Terminal | null>(null)
+  const cbRef = useRef({ onExit, onActivity, onAttention, onUserInput, onOpenFile })
+  cbRef.current = { onExit, onActivity, onAttention, onUserInput, onOpenFile }
+  const activeRef = useRef(active)
+  activeRef.current = active
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+
+    const term = new Terminal({
+      fontFamily: '"JetBrainsMono Nerd Font", "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace',
+      fontSize: 13,
+      cursorBlink: true,
+      scrollback: 10000,
+      theme: {
+        background: '#0d1117',
+        foreground: '#e6edf3',
+        cursor: '#58a6ff',
+        selectionBackground: '#264f78',
+        black: '#484f58',
+        red: '#ff7b72',
+        green: '#3fb950',
+        yellow: '#d29922',
+        blue: '#58a6ff',
+        magenta: '#bc8cff',
+        cyan: '#39c5cf',
+        white: '#b1bac4',
+        brightBlack: '#6e7681',
+        brightRed: '#ffa198',
+        brightGreen: '#56d364',
+        brightYellow: '#e3b341',
+        brightBlue: '#79c0ff',
+        brightMagenta: '#d2a8ff',
+        brightCyan: '#56d4dd',
+        brightWhite: '#f0f6fc'
+      }
+    })
+
+    const copySelection = (): void => {
+      const sel = term.getSelection()
+      if (sel) navigator.clipboard.writeText(sel)
+    }
+    const pasteClipboard = (): void => {
+      // term.paste respeta el bracketed paste mode de los TUI.
+      navigator.clipboard.readText().then((text) => text && term.paste(text))
+    }
+
+    term.attachCustomKeyEventHandler((e) => {
+      // Deja pasar Ctrl/Cmd+1..6 al atajo global de cambio de celda.
+      if ((e.ctrlKey || e.metaKey) && e.key >= '1' && e.key <= '6') return false
+      // Ctrl+Shift+P abre la paleta de comandos aunque el foco esté aquí.
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.code === 'KeyP') return false
+      if (e.type !== 'keydown') return true
+      // Atajos estándar de terminal: Ctrl+Shift+C/V (Ctrl+C solo sigue siendo SIGINT)
+      if (e.ctrlKey && e.shiftKey && !e.altKey && e.code === 'KeyC') {
+        copySelection()
+        return false
+      }
+      if (e.ctrlKey && e.shiftKey && !e.altKey && e.code === 'KeyV') {
+        pasteClipboard()
+        return false
+      }
+      // macOS: Cmd+C copia si hay selección (sin selección pasa al TUI), Cmd+V pega
+      if (e.metaKey && !e.ctrlKey && e.code === 'KeyC' && term.hasSelection()) {
+        copySelection()
+        return false
+      }
+      if (e.metaKey && !e.ctrlKey && e.code === 'KeyV') {
+        pasteClipboard()
+        return false
+      }
+      return true
+    })
+
+    const fit = new FitAddon()
+    term.loadAddon(fit)
+    term.loadAddon(new WebLinksAddon((_event, uri) => window.open(uri)))
+    term.open(el)
+    fit.fit()
+    termRef.current = term
+
+    let disposed = false
+    const cleanups: Array<() => void> = []
+
+    // Monitor de actividad: con salida fluyendo el agente "trabaja"; si calla
+    // ~2.5s probablemente terminó o espera input → aviso si la celda no está activa.
+    let lastOutput = Date.now()
+    let working = false
+    window.bridge
+      .createPty({ id: ptyId, cwd, command, cols: term.cols, rows: term.rows })
+      .then(() => {
+        if (disposed) {
+          window.bridge.kill(ptyId)
+          return
+        }
+        cleanups.push(
+          window.bridge.onData(ptyId, (data) => {
+            term.write(data)
+            lastOutput = Date.now()
+            if (!working) {
+              working = true
+              cbRef.current.onActivity('working')
+            }
+          })
+        )
+        cleanups.push(window.bridge.onExit(ptyId, (code) => cbRef.current.onExit(code)))
+      })
+
+    const quietTimer = window.setInterval(() => {
+      if (working && Date.now() - lastOutput > 2500) {
+        working = false
+        cbRef.current.onActivity('idle')
+        if (!activeRef.current) cbRef.current.onAttention()
+      }
+    }, 600)
+
+    // Campana (BEL): Claude Code la usa para pedir atención (permisos, etc.).
+    const bellDisp = term.onBell(() => {
+      if (!activeRef.current) cbRef.current.onAttention()
+    })
+
+    const inputDisp = term.onData((data) => {
+      window.bridge.write(ptyId, data)
+      cbRef.current.onUserInput()
+    })
+
+    // Ctrl+clic sobre rutas de archivo en la salida → abrir en una celda visor.
+    const linkDisp = term.registerLinkProvider({
+      provideLinks(y, callback) {
+        const line = term.buffer.active.getLine(y - 1)
+        if (!line) return callback(undefined)
+        const text = line.translateToString(true)
+        const candidates: Array<{ idx: number; raw: string; clean: string }> = []
+        PATH_RE.lastIndex = 0
+        let m: RegExpExecArray | null
+        while ((m = PATH_RE.exec(text))) {
+          const before = text.slice(Math.max(0, m.index - 8), m.index)
+          if (before.includes('://')) continue // las URLs son del WebLinksAddon
+          const clean = m[0].replace(/:\d+(?::\d+)?$/, '').replace(/[)\],.;:'"]+$/, '')
+          if (clean.length < 3) continue
+          candidates.push({ idx: m.index, raw: m[0], clean })
+        }
+        if (candidates.length === 0) return callback(undefined)
+        Promise.all(
+          candidates.map(async (c) => {
+            const resolved = await window.bridge.resolveExisting(c.clean, cwd)
+            if (!resolved) return null
+            const link: ILink = {
+              range: { start: { x: c.idx + 1, y }, end: { x: c.idx + c.raw.length, y } },
+              text: c.raw,
+              activate: (event) => {
+                if (event.ctrlKey || event.metaKey) cbRef.current.onOpenFile(resolved)
+              }
+            }
+            return link
+          })
+        ).then((links) => callback(links.filter((l): l is ILink => l !== null)))
+      }
+    })
+
+    // Selección con mouse → portapapeles primario (solo Linux), como toda terminal.
+    const selDisp = term.onSelectionChange(() => {
+      if (window.bridge.platform === 'linux' && term.hasSelection()) {
+        window.bridge.writePrimary(term.getSelection())
+      }
+    })
+
+    // Clic del medio → pegar desde el primario, salvo que el TUI capture el mouse.
+    const onAuxClick = (e: MouseEvent): void => {
+      if (e.button !== 1 || window.bridge.platform !== 'linux') return
+      if (term.modes.mouseTrackingMode !== 'none') return
+      e.preventDefault()
+      const text = window.bridge.readPrimary()
+      if (text) term.paste(text)
+    }
+    el.addEventListener('auxclick', onAuxClick)
+
+    const onContextMenu = async (e: MouseEvent): Promise<void> => {
+      e.preventDefault()
+      const action = await window.bridge.termMenu(term.hasSelection())
+      switch (action) {
+        case 'copy':
+          copySelection()
+          break
+        case 'paste':
+          pasteClipboard()
+          break
+        case 'selectAll':
+          term.selectAll()
+          break
+        case 'clear':
+          term.clear()
+          break
+      }
+    }
+    el.addEventListener('contextmenu', onContextMenu)
+
+    const ro = new ResizeObserver(() => {
+      fit.fit()
+      window.bridge.resize(ptyId, term.cols, term.rows)
+    })
+    ro.observe(el)
+
+    term.focus()
+
+    return () => {
+      disposed = true
+      ro.disconnect()
+      window.clearInterval(quietTimer)
+      el.removeEventListener('auxclick', onAuxClick)
+      el.removeEventListener('contextmenu', onContextMenu)
+      linkDisp.dispose()
+      bellDisp.dispose()
+      selDisp.dispose()
+      inputDisp.dispose()
+      cleanups.forEach((off) => off())
+      window.bridge.kill(ptyId)
+      term.dispose()
+      termRef.current = null
+    }
+  }, [ptyId, command, cwd])
+
+  useEffect(() => {
+    if (active) termRef.current?.focus()
+  }, [active])
+
+  const [dragOver, setDragOver] = useState(false)
+
+  return (
+    <div
+      ref={containerRef}
+      className={`term-container ${dragOver ? 'drop-target' : ''}`}
+      onDragOver={(e) => {
+        e.preventDefault()
+        e.dataTransfer.dropEffect = 'copy'
+        setDragOver(true)
+      }}
+      onDragLeave={() => setDragOver(false)}
+      onDrop={(e) => {
+        e.preventDefault()
+        setDragOver(false)
+        const paths = Array.from(e.dataTransfer.files)
+          .map((f) => window.bridge.filePathFor(f))
+          .filter(Boolean)
+        if (paths.length === 0) return
+        // Las rutas con caracteres especiales van entre comillas para el shell.
+        const quoted = paths
+          .map((p) => (/[^\w@%+=:,./-]/.test(p) ? `'${p.replace(/'/g, "'\\''")}'` : p))
+          .join(' ')
+        termRef.current?.paste(quoted)
+        termRef.current?.focus()
+      }}
+    />
+  )
+}
