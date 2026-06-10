@@ -43,6 +43,7 @@ const api = {
     cwd: string
     command: string | null
     perm?: 'default' | 'flexible' | 'yolo'
+    resume?: boolean
     cols: number
     rows: number
   }): Promise<string> => ipcRenderer.invoke('pty:create', opts),

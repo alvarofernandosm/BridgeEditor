@@ -131,6 +131,7 @@ export function TerminalCell({
                 cwd,
                 mode,
                 perm,
+                resume: false,
                 chatSessionId: null,
                 status: 'running',
                 exitCode: undefined
@@ -166,6 +167,7 @@ export function TerminalCell({
             command={AGENTS[cell.agent].command}
             cwd={cell.cwd}
             perm={cell.perm}
+            resume={cell.resume}
             active={active}
             onExit={(code) => onUpdate(cell.id, { status: 'exited', exitCode: code })}
             onActivity={(activity) => onUpdate(cell.id, { activity })}
@@ -207,6 +209,7 @@ interface TerminalViewProps {
   command: string | null
   cwd: string
   perm: CellState['perm']
+  resume: boolean
   active: boolean
   onExit: (code: number) => void
   onActivity: (activity: 'working' | 'idle') => void
@@ -224,6 +227,7 @@ function TerminalView({
   command,
   cwd,
   perm,
+  resume,
   active,
   onExit,
   onActivity,
@@ -330,7 +334,7 @@ function TerminalView({
     let burstStart = 0
     let working = false
     window.bridge
-      .createPty({ id: ptyId, cwd, command, perm, cols: term.cols, rows: term.rows })
+      .createPty({ id: ptyId, cwd, command, perm, resume, cols: term.cols, rows: term.rows })
       .then(() => {
         if (disposed) {
           window.bridge.kill(ptyId)
@@ -463,7 +467,7 @@ function TerminalView({
       term.dispose()
       termRef.current = null
     }
-  }, [ptyId, command, cwd, perm])
+  }, [ptyId, command, cwd, perm, resume])
 
   // Ctrl+Shift+A/D desde App: pegar la ruta elegida en esta terminal.
   useEffect(() => {

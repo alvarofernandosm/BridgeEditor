@@ -19,12 +19,23 @@ export function registerPtyHandlers(): void {
         cwd: string
         command: string | null
         perm?: PermLevel
+        resume?: boolean
         cols: number
         rows: number
       }
     ) => {
       const { id, cwd, cols, rows } = opts
-      const { command, env: permEnv } = applyPermissions(opts.command, opts.perm ?? 'default')
+      const applied = applyPermissions(opts.command, opts.perm ?? 'default')
+      const permEnv = applied.env
+      let command = applied.command
+      // Celda restaurada: el agente retoma su última conversación del directorio.
+      if (
+        opts.resume &&
+        command &&
+        (command.startsWith('claude') || command.startsWith('opencode'))
+      ) {
+        command += ' --continue'
+      }
       const wc = event.sender
       const shellPath = defaultShell()
       // Shell de login: hereda el PATH del usuario (nvm, ~/.local/bin, etc.),

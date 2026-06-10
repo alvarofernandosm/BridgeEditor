@@ -13,6 +13,8 @@ export interface CellState {
   mode: 'term' | 'chat'
   /** Nivel de permisos con el que se lanza el agente de esta celda. */
   perm: PermLevel
+  /** true cuando la celda viene de una restauración: el agente se lanza con --continue. */
+  resume: boolean
   /** Sesión de claude para --resume entre turnos (y entre reinicios). */
   chatSessionId: string | null
   /** Ruta del archivo abierto cuando la celda es un visor (status 'file'). */
@@ -36,6 +38,7 @@ const newCell = (): CellState => ({
   agent: null,
   mode: 'term',
   perm: 'default',
+  resume: false,
   chatSessionId: null,
   file: null,
   cwd: '',
@@ -73,6 +76,8 @@ function loadSavedLayout(): CellState[] | null {
         agent,
         mode: s.mode === 'chat' && agent !== 'shell' ? 'chat' : 'term',
         perm: s.perm === 'flexible' || s.perm === 'yolo' ? s.perm : 'default',
+        // las terminales de agente restauradas retoman su última conversación
+        resume: agent !== null && agent !== 'shell' && s.mode !== 'chat',
         chatSessionId: typeof s.chatSessionId === 'string' ? s.chatSessionId : null,
         file,
         cwd: typeof s.cwd === 'string' ? s.cwd : '',
