@@ -18,6 +18,8 @@ linux:
     - AppImage
     - deb
   category: Development
+deb:
+  afterInstall: build/deb-after-install.sh
 mac:
   category: public.app-category.developer-tools
   target:
