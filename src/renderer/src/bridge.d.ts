@@ -22,7 +22,7 @@ declare global {
         cwd: string
         message: string
         sessionId: string | null
-        permissionMode: 'plan' | 'edits' | 'full'
+        permissionMode: 'plan' | 'edits' | 'flexible' | 'full'
       }): Promise<void>
       chatCancel(id: string): void
       chatSessions(cwd: string): Promise<Array<{ id: string; mtimeMs: number; summary: string }>>
@@ -31,6 +31,7 @@ declare global {
         id: string
         cwd: string
         command: string | null
+        perm?: 'default' | 'flexible' | 'yolo'
         cols: number
         rows: number
       }): Promise<string>

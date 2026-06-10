@@ -1,5 +1,6 @@
 import { ipcMain } from 'electron'
 import * as pty from 'node-pty'
+import { applyPermissions, type PermLevel } from './permissions'
 
 const sessions = new Map<string, pty.IPty>()
 
@@ -13,9 +14,17 @@ export function registerPtyHandlers(): void {
     'pty:create',
     (
       event,
-      opts: { id: string; cwd: string; command: string | null; cols: number; rows: number }
+      opts: {
+        id: string
+        cwd: string
+        command: string | null
+        perm?: PermLevel
+        cols: number
+        rows: number
+      }
     ) => {
-      const { id, cwd, command, cols, rows } = opts
+      const { id, cwd, cols, rows } = opts
+      const { command, env: permEnv } = applyPermissions(opts.command, opts.perm ?? 'default')
       const wc = event.sender
       const shellPath = defaultShell()
       // Shell de login: hereda el PATH del usuario (nvm, ~/.local/bin, etc.),
@@ -29,6 +38,7 @@ export function registerPtyHandlers(): void {
         cwd,
         env: {
           ...process.env,
+          ...permEnv,
           TERM: 'xterm-256color',
           COLORTERM: 'truecolor'
         } as Record<string, string>

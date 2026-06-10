@@ -125,11 +125,12 @@ export function TerminalCell({
       >
         {cell.status === 'launcher' && (
           <Launcher
-            onStart={(kind, cwd, mode) =>
+            onStart={(kind, cwd, mode, perm) =>
               onUpdate(cell.id, {
                 agent: kind,
                 cwd,
                 mode,
+                perm,
                 chatSessionId: null,
                 status: 'running',
                 exitCode: undefined
@@ -148,6 +149,9 @@ export function TerminalCell({
               agent={cell.agent}
               cwd={cell.cwd}
               active={active}
+              initialPerm={
+                cell.perm === 'flexible' ? 'flexible' : cell.perm === 'yolo' ? 'full' : 'edits'
+              }
               sessionId={cell.chatSessionId}
               onSessionId={(sid) => onUpdate(cell.id, { chatSessionId: sid })}
               onActivity={(activity) => onUpdate(cell.id, { activity })}
@@ -158,8 +162,10 @@ export function TerminalCell({
           <TerminalView
             key={ptyId}
             ptyId={ptyId}
+            cellId={cell.id}
             command={AGENTS[cell.agent].command}
             cwd={cell.cwd}
+            perm={cell.perm}
             active={active}
             onExit={(code) => onUpdate(cell.id, { status: 'exited', exitCode: code })}
             onActivity={(activity) => onUpdate(cell.id, { activity })}
@@ -197,8 +203,10 @@ export function TerminalCell({
 
 interface TerminalViewProps {
   ptyId: string
+  cellId: string
   command: string | null
   cwd: string
+  perm: CellState['perm']
   active: boolean
   onExit: (code: number) => void
   onActivity: (activity: 'working' | 'idle') => void
@@ -212,8 +220,10 @@ const PATH_RE = /(?:~|\.{1,2})?\/[\w.@+~/-]+|(?:[\w.@+-]+\/)+[\w.@+-]+\.[A-Za-z]
 
 function TerminalView({
   ptyId,
+  cellId,
   command,
   cwd,
+  perm,
   active,
   onExit,
   onActivity,
@@ -273,8 +283,12 @@ function TerminalView({
     term.attachCustomKeyEventHandler((e) => {
       // Deja pasar Ctrl/Cmd+1..6 al atajo global de cambio de celda.
       if ((e.ctrlKey || e.metaKey) && e.key >= '1' && e.key <= '6') return false
-      // Ctrl+Shift+P abre la paleta de comandos aunque el foco esté aquí.
+      // Atajos globales que no deben llegar al TUI (las terminales no
+      // distinguen Ctrl+Shift+letra de Ctrl+letra: si no se interceptan,
+      // Ctrl+Shift+D se colaría como Ctrl+D = EOF).
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.code === 'KeyP') return false
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.code === 'KeyA') return false
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.code === 'KeyD') return false
       if (e.type !== 'keydown') return true
       // Atajos estándar de terminal: Ctrl+Shift+C/V (Ctrl+C solo sigue siendo SIGINT)
       if (e.ctrlKey && e.shiftKey && !e.altKey && e.code === 'KeyC') {
@@ -312,7 +326,7 @@ function TerminalView({
     let lastOutput = Date.now()
     let working = false
     window.bridge
-      .createPty({ id: ptyId, cwd, command, cols: term.cols, rows: term.rows })
+      .createPty({ id: ptyId, cwd, command, perm, cols: term.cols, rows: term.rows })
       .then(() => {
         if (disposed) {
           window.bridge.kill(ptyId)
@@ -443,7 +457,19 @@ function TerminalView({
       term.dispose()
       termRef.current = null
     }
-  }, [ptyId, command, cwd])
+  }, [ptyId, command, cwd, perm])
+
+  // Ctrl+Shift+A/D desde App: pegar la ruta elegida en esta terminal.
+  useEffect(() => {
+    const onInsert = (e: Event): void => {
+      const detail = (e as CustomEvent).detail as { cellId: string; text: string }
+      if (detail.cellId !== cellId) return
+      termRef.current?.paste(detail.text)
+      termRef.current?.focus()
+    }
+    window.addEventListener('bridge:insert-path', onInsert)
+    return () => window.removeEventListener('bridge:insert-path', onInsert)
+  }, [cellId])
 
   useEffect(() => {
     if (active) termRef.current?.focus()

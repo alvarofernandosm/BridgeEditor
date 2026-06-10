@@ -1,13 +1,14 @@
 import { useEffect, useState } from 'react'
-import type { AgentKind } from './App'
+import type { AgentKind, PermLevel } from './App'
 
 interface LauncherProps {
-  onStart: (kind: AgentKind, cwd: string, mode: 'term' | 'chat') => void
+  onStart: (kind: AgentKind, cwd: string, mode: 'term' | 'chat', perm: PermLevel) => void
   onOpenFile: (path: string) => void
 }
 
 export function Launcher({ onStart, onOpenFile }: LauncherProps): JSX.Element {
   const [cwd, setCwd] = useState('')
+  const [perm, setPerm] = useState<PermLevel>('default')
 
   useEffect(() => {
     window.bridge.homeDir().then((home) => setCwd((current) => current || home))
@@ -19,7 +20,7 @@ export function Launcher({ onStart, onOpenFile }: LauncherProps): JSX.Element {
   }
 
   const start = (kind: AgentKind, mode: 'term' | 'chat' = 'term'): void => {
-    if (cwd.trim()) onStart(kind, cwd.trim(), mode)
+    if (cwd.trim()) onStart(kind, cwd.trim(), mode, perm)
   }
 
   return (
@@ -35,6 +36,14 @@ export function Launcher({ onStart, onOpenFile }: LauncherProps): JSX.Element {
         <button onClick={pick} title="Examinar…">
           📁
         </button>
+      </div>
+      <div className="perm-row">
+        <span>Permisos del agente</span>
+        <select value={perm} onChange={(e) => setPerm(e.target.value as PermLevel)}>
+          <option value="default">preguntar todo (default)</option>
+          <option value="flexible">flexible — solo pregunta lo crítico</option>
+          <option value="yolo">sin preguntar nada (⚠ riesgoso)</option>
+        </select>
       </div>
       <div className="launcher-group">
         <span className="launcher-label">Terminal</span>

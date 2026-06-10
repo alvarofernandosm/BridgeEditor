@@ -3,6 +3,7 @@ import { spawn, type ChildProcess } from 'child_process'
 import { readdir, stat, open } from 'fs/promises'
 import { join } from 'path'
 import { homedir } from 'os'
+import { claudeFlexibleSettingsPath } from './permissions'
 
 // Corre Claude Code / OpenCode en modo headless (un proceso por turno) y
 // normaliza su salida a eventos simples para la vista de chat.
@@ -19,7 +20,7 @@ interface ChatSendOpts {
   cwd: string
   message: string
   sessionId: string | null
-  permissionMode: 'plan' | 'edits' | 'full'
+  permissionMode: 'plan' | 'edits' | 'flexible' | 'full'
 }
 
 function buildCommand(opts: ChatSendOpts): string {
@@ -28,6 +29,8 @@ function buildCommand(opts: ChatSendOpts): string {
     if (opts.sessionId) flags.push('--resume', shellQuote(opts.sessionId))
     if (opts.permissionMode === 'full') flags.push('--dangerously-skip-permissions')
     else if (opts.permissionMode === 'plan') flags.push('--permission-mode', 'plan')
+    else if (opts.permissionMode === 'flexible')
+      flags.push('--settings', shellQuote(claudeFlexibleSettingsPath()))
     else flags.push('--permission-mode', 'acceptEdits')
     return `claude ${flags.join(' ')}`
   }

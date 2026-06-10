@@ -24,6 +24,12 @@ jobs:
           node-version: 20
           cache: npm
 
+      # node-gyp (compilación de node-pty) necesita distutils, eliminado en
+      # Python 3.12 — los runners de Windows/macOS lo traen por defecto.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       - name: Instalar dependencias (compila node-pty para esta plataforma)
         run: npm ci
 

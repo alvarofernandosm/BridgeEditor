@@ -4,12 +4,15 @@ import { Palette, type PaletteCommand } from './Palette'
 import { AGENTS } from './TerminalCell'
 
 export type AgentKind = 'claude' | 'opencode' | 'shell'
+export type PermLevel = 'default' | 'flexible' | 'yolo'
 
 export interface CellState {
   id: string
   agent: AgentKind | null
   /** 'term' = TUI en PTY; 'chat' = interfaz de chat sobre el modo headless. */
   mode: 'term' | 'chat'
+  /** Nivel de permisos con el que se lanza el agente de esta celda. */
+  perm: PermLevel
   /** Sesión de claude para --resume entre turnos (y entre reinicios). */
   chatSessionId: string | null
   /** Ruta del archivo abierto cuando la celda es un visor (status 'file'). */
@@ -32,6 +35,7 @@ const newCell = (): CellState => ({
   id: `cell-${nextId++}`,
   agent: null,
   mode: 'term',
+  perm: 'default',
   chatSessionId: null,
   file: null,
   cwd: '',
@@ -47,6 +51,7 @@ const AGENT_KINDS: AgentKind[] = ['claude', 'opencode', 'shell']
 interface SavedCell {
   agent: AgentKind | null
   mode?: 'term' | 'chat'
+  perm?: PermLevel
   chatSessionId?: string | null
   file: string | null
   cwd: string
@@ -67,6 +72,7 @@ function loadSavedLayout(): CellState[] | null {
         id: `cell-${nextId++}`,
         agent,
         mode: s.mode === 'chat' && agent !== 'shell' ? 'chat' : 'term',
+        perm: s.perm === 'flexible' || s.perm === 'yolo' ? s.perm : 'default',
         chatSessionId: typeof s.chatSessionId === 'string' ? s.chatSessionId : null,
         file,
         cwd: typeof s.cwd === 'string' ? s.cwd : '',
@@ -113,6 +119,7 @@ export default function App(): JSX.Element {
     const snapshot: SavedCell[] = cells.map((c) => ({
       agent: c.agent,
       mode: c.mode,
+      perm: c.perm,
       chatSessionId: c.chatSessionId,
       file: c.file,
       cwd: c.cwd
@@ -163,8 +170,36 @@ export default function App(): JSX.Element {
     )
   }, [])
 
+  // Ctrl+Shift+A / Ctrl+Shift+D: elegir archivo/directorio y pegar su ruta
+  // (entre comillas si hace falta) en la terminal o el chat de la celda activa.
+  // Se usan combos con Shift porque los TUI no los distinguen de Ctrl+letra:
+  // los interceptamos nosotros y Ctrl+O/A/D simples siguen llegando al agente.
+  const insertPathIntoActive = useCallback(
+    async (kind: 'file' | 'dir') => {
+      if (!activeId) return
+      const path =
+        kind === 'file' ? await window.bridge.pickFile() : await window.bridge.pickDirectory()
+      if (!path) return
+      const quoted = /[^\w@%+=:,./-]/.test(path) ? `'${path.replace(/'/g, "'\\''")}'` : path
+      window.dispatchEvent(
+        new CustomEvent('bridge:insert-path', { detail: { cellId: activeId, text: quoted } })
+      )
+    },
+    [activeId]
+  )
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.code === 'KeyA') {
+        e.preventDefault()
+        insertPathIntoActive('file')
+        return
+      }
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.code === 'KeyD') {
+        e.preventDefault()
+        insertPathIntoActive('dir')
+        return
+      }
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.code === 'KeyP') {
         e.preventDefault()
         setPaletteOpen((open) => !open)
@@ -190,7 +225,7 @@ export default function App(): JSX.Element {
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [cells, activateCell])
+  }, [cells, activateCell, insertPathIntoActive])
 
   const activeCell = cells.find((c) => c.id === activeId) ?? null
   const paletteCommands: PaletteCommand[] = []
@@ -235,6 +270,20 @@ export default function App(): JSX.Element {
           updateCell(activeCell.id, { status: 'running', generation: activeCell.generation + 1 })
       })
     }
+  }
+  if (activeCell?.status === 'running') {
+    paletteCommands.push({
+      id: 'insert-file',
+      label: 'Insertar ruta de archivo en la celda activa…',
+      hint: 'Ctrl+Shift+A',
+      run: () => insertPathIntoActive('file')
+    })
+    paletteCommands.push({
+      id: 'insert-dir',
+      label: 'Insertar ruta de carpeta en la celda activa…',
+      hint: 'Ctrl+Shift+D',
+      run: () => insertPathIntoActive('dir')
+    })
   }
   cells.forEach((c, i) => {
     paletteCommands.push({

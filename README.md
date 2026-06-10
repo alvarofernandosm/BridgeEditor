@@ -55,6 +55,30 @@ las de agente relanzan su comando en el mismo directorio.
   en una celda visor (rutas absolutas, `~/`, `./` o relativas al directorio de
   la celda; sufijos `:línea:columna` se ignoran).
 
+## Niveles de permisos del agente
+
+El launcher de cada celda tiene un selector de permisos (también el chat):
+
+- **preguntar todo** — el comportamiento normal del agente.
+- **flexible** — auto-aprueba lo cotidiano: leer/editar archivos, `git add`,
+  `git commit`, `git diff/log/status`, correr tests (`npm run/test`, `make`,
+  `cargo`, `go`), comandos de lectura (`ls`, `cat`, `grep`…) y **WebSearch**.
+  Sigue preguntando lo crítico: `sudo`, `rm`, `chmod`, `git push`,
+  `curl`/`wget`, y **WebFetch** de contenido arbitrario (el vector típico de
+  prompt injection). En Claude se aplica con `--settings` (merge con tu
+  config); en OpenCode vía `OPENCODE_PERMISSION`.
+- **sin preguntar** — `--dangerously-skip-permissions`. Bajo tu
+  responsabilidad 😄.
+
+## Insertar rutas externas
+
+Con el foco en una celda (terminal o chat): `Ctrl+Shift+A` abre el selector de
+**a**rchivo y `Ctrl+Shift+D` el de **d**irectorio; la ruta elegida se pega
+entre comillas en la celda activa. Pensado para referirle al agente archivos
+fuera del proyecto sin escribir rutas a mano. Los combos se eligieron para no
+chocar con los atajos de Claude Code/OpenCode: las variantes simples
+(`Ctrl+O`, `Ctrl+A`, `Ctrl+D`) siguen llegando intactas al TUI.
+
 ## Paleta de comandos
 
 `Ctrl+Shift+P` (o `Ctrl+K` fuera de una terminal) abre la paleta: lanzar un

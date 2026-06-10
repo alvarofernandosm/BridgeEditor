@@ -8,11 +8,14 @@ interface ChatMsg {
   name?: string
 }
 
+type ChatPerm = 'plan' | 'edits' | 'flexible' | 'full'
+
 interface ChatViewProps {
   cellId: string
   agent: Exclude<AgentKind, 'shell'>
   cwd: string
   active: boolean
+  initialPerm: ChatPerm
   sessionId: string | null
   onSessionId: (id: string | null) => void
   onActivity: (activity: 'working' | 'idle') => void
@@ -30,9 +33,10 @@ const HELP_TEXT =
   '/new — conversación nueva · /help — esta ayuda. Cualquier otro /comando se envía ' +
   'al agente (tus comandos personalizados de .claude/commands funcionan).'
 
-const PERM_LABELS: Record<'plan' | 'edits' | 'full', string> = {
+const PERM_LABELS: Record<ChatPerm, string> = {
   plan: 'solo planear',
   edits: 'acepta ediciones',
+  flexible: 'flexible (solo crítico)',
   full: 'sin preguntar'
 }
 
@@ -41,6 +45,7 @@ export function ChatView({
   agent,
   cwd,
   active,
+  initialPerm,
   sessionId,
   onSessionId,
   onActivity,
@@ -54,7 +59,7 @@ export function ChatView({
   const [input, setInput] = useState('')
   const [running, setRunning] = useState(false)
   const [elapsed, setElapsed] = useState(0)
-  const [permMode, setPermMode] = useState<'plan' | 'edits' | 'full'>('edits')
+  const [permMode, setPermMode] = useState<ChatPerm>(initialPerm)
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -125,6 +130,18 @@ export function ChatView({
   useEffect(() => {
     if (active && !running) inputRef.current?.focus()
   }, [active, running])
+
+  // Ctrl+Shift+A/D desde App: insertar la ruta elegida en el mensaje.
+  useEffect(() => {
+    const onInsert = (e: Event): void => {
+      const detail = (e as CustomEvent).detail as { cellId: string; text: string }
+      if (detail.cellId !== cellId) return
+      setInput((current) => (current ? `${current} ${detail.text}` : detail.text))
+      inputRef.current?.focus()
+    }
+    window.addEventListener('bridge:insert-path', onInsert)
+    return () => window.removeEventListener('bridge:insert-path', onInsert)
+  }, [cellId])
 
   const addMeta = (text: string): void => setMessages((ms) => [...ms, { role: 'meta', text }])
 
@@ -279,7 +296,7 @@ export function ChatView({
           <select
             value={permMode}
             title="Permisos del agente en este chat"
-            onChange={(e) => setPermMode(e.target.value as 'plan' | 'edits' | 'full')}
+            onChange={(e) => setPermMode(e.target.value as ChatPerm)}
           >
             {(Object.keys(PERM_LABELS) as Array<keyof typeof PERM_LABELS>).map((k) => (
               <option key={k} value={k}>
