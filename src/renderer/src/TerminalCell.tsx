@@ -321,9 +321,13 @@ function TerminalView({
     let disposed = false
     const cleanups: Array<() => void> = []
 
-    // Monitor de actividad: con salida fluyendo el agente "trabaja"; si calla
-    // ~2.5s probablemente terminó o espera input → aviso si la celda no está activa.
-    let lastOutput = Date.now()
+    // Monitor de actividad: solo la salida SOSTENIDA (≥1.5s, como el spinner de
+    // un agente pensando o un build) cuenta como "trabajando"; al callarse
+    // ~2.5s → aviso si la celda no está activa. Las ráfagas cortas (banner de
+    // arranque, repintado del TUI al cambiar el foco) no disparan nada — si
+    // contaran, cada cambio de foco terminaría en una falsa alerta de atención.
+    let lastOutput = 0
+    let burstStart = 0
     let working = false
     window.bridge
       .createPty({ id: ptyId, cwd, command, perm, cols: term.cols, rows: term.rows })
@@ -335,8 +339,10 @@ function TerminalView({
         cleanups.push(
           window.bridge.onData(ptyId, (data) => {
             term.write(data)
-            lastOutput = Date.now()
-            if (!working) {
+            const now = Date.now()
+            if (now - lastOutput > 2500) burstStart = now
+            lastOutput = now
+            if (!working && now - burstStart >= 1500) {
               working = true
               cbRef.current.onActivity('working')
             }
