@@ -59,8 +59,10 @@ export async function listChatModels(agent: 'claude' | 'opencode'): Promise<stri
   return new Promise((resolve) => {
     const child =
       process.platform === 'win32'
-        ? spawn('opencode models', { shell: true })
-        : spawn(process.env.SHELL || '/bin/bash', ['-ilc', 'opencode models'])
+        ? spawn('opencode models', { shell: true, stdio: ['ignore', 'pipe', 'pipe'] })
+        : spawn(process.env.SHELL || '/bin/bash', ['-ilc', 'opencode models'], {
+            stdio: ['ignore', 'pipe', 'pipe']
+          })
     let out = ''
     const timer = setTimeout(() => {
       child.kill()
@@ -165,10 +167,13 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
     // -ilc (login + interactivo): garantiza el PATH del usuario aunque la app
     // se lance desde el menú de aplicaciones (nvm y similares viven en .bashrc,
     // que los shells no interactivos se saltan).
+    // stdio: stdin cerrado — opencode run lee stdin si está abierto (modo pipe)
+    // y se quedaría esperando EOF para siempre.
+    const stdio: ['ignore', 'pipe', 'pipe'] = ['ignore', 'pipe', 'pipe']
     const child =
       process.platform === 'win32'
-        ? spawn(cmd, { cwd: opts.cwd, shell: true, env })
-        : spawn(process.env.SHELL || '/bin/bash', ['-ilc', cmd], { cwd: opts.cwd, env })
+        ? spawn(cmd, { cwd: opts.cwd, shell: true, env, stdio })
+        : spawn(process.env.SHELL || '/bin/bash', ['-ilc', cmd], { cwd: opts.cwd, env, stdio })
     running.set(opts.id, child)
 
     let buf = ''
