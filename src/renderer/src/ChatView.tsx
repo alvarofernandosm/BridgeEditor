@@ -3,7 +3,7 @@ import { renderMarkdown } from './highlight'
 import type { AgentKind } from './App'
 
 interface ChatMsg {
-  role: 'user' | 'assistant' | 'tool' | 'meta' | 'error'
+  role: 'user' | 'remote-user' | 'assistant' | 'tool' | 'meta' | 'error'
   text: string
   name?: string
 }
@@ -73,6 +73,13 @@ export function ChatView({
         case 'init':
           sessionRef.current = ev.sessionId
           onSessionId(ev.sessionId)
+          break
+        case 'remote-user':
+          setMessages((ms) => [...ms, { role: 'remote-user', text: ev.text, name: ev.from }])
+          break
+        case 'turn-start':
+          setRunning(true)
+          onActivity('working')
           break
         case 'text':
           setMessages((ms) => [...ms, { role: 'assistant', text: ev.text }])
@@ -216,6 +223,14 @@ export function ChatView({
           if (m.role === 'user') {
             return (
               <div key={i} className="chat-user">
+                {m.text}
+              </div>
+            )
+          }
+          if (m.role === 'remote-user') {
+            return (
+              <div key={i} className="chat-user chat-user-remote">
+                <span className="chat-remote-from">📨 {m.name}</span>
                 {m.text}
               </div>
             )

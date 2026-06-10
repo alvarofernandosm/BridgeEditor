@@ -4,6 +4,9 @@ import os from 'os'
 import { registerPtyHandlers, killAllPtys } from './pty'
 import { registerFileHandlers, unwatchAllFiles } from './files'
 import { registerChatHandlers, killAllChats } from './chat'
+import { registerBridge } from './bridge'
+
+let mainWindow: BrowserWindow | null = null
 
 function createWindow(): void {
   const iconPath = app.isPackaged
@@ -24,6 +27,11 @@ function createWindow(): void {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false
     }
+  })
+
+  mainWindow = win
+  win.on('closed', () => {
+    if (mainWindow === win) mainWindow = null
   })
 
   win.on('ready-to-show', () => win.show())
@@ -73,6 +81,7 @@ app.whenReady().then(() => {
   registerPtyHandlers()
   registerFileHandlers()
   registerChatHandlers()
+  registerBridge(() => mainWindow)
 
   // Menú contextual nativo de la terminal; resuelve con la acción elegida.
   ipcMain.handle('ui:termMenu', (event, hasSelection: boolean) => {

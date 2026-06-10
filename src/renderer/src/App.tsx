@@ -125,6 +125,23 @@ export default function App(): JSX.Element {
     }
   }, [])
 
+  // El main necesita conocer las celdas para el puente de delegación.
+  useEffect(() => {
+    window.bridge.syncCells(
+      cells.map((c, i) => ({
+        id: c.id,
+        index: i + 1,
+        label: labelOf(c),
+        agent: c.agent,
+        mode: c.mode,
+        cwd: c.cwd,
+        perm: c.perm,
+        chatSessionId: c.chatSessionId,
+        busy: c.activity === 'working'
+      }))
+    )
+  }, [cells])
+
   useEffect(() => {
     const snapshot: SavedCell[] = cells.map((c) => ({
       agent: c.agent,

@@ -4,6 +4,7 @@ import { readdir, stat, open } from 'fs/promises'
 import { join } from 'path'
 import { homedir } from 'os'
 import { claudeFlexibleSettingsPath } from './permissions'
+import { bridgeEnv } from './bridge-state'
 
 // Corre Claude Code / OpenCode en modo headless (un proceso por turno) y
 // normaliza su salida a eventos simples para la vista de chat.
@@ -14,13 +15,19 @@ const running = new Map<string, ChildProcess>()
 
 const shellQuote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`
 
-interface ChatSendOpts {
+export interface ChatSendOpts {
   id: string
   agent: 'claude' | 'opencode'
   cwd: string
   message: string
   sessionId: string | null
   permissionMode: 'plan' | 'edits' | 'flexible' | 'full'
+}
+
+export interface ChatTurnResult {
+  text: string
+  error: string | null
+  sessionId: string | null
 }
 
 function buildCommand(opts: ChatSendOpts): string {
@@ -79,70 +86,112 @@ const stripAnsi = (s: string): string =>
   // eslint-disable-next-line no-control-regex
   s.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
 
+/**
+ * Ejecuta un turno headless y emite los eventos normalizados por `emit`.
+ * Lo usan el chat de cada celda (IPC) y el puente de delegación entre celdas,
+ * que además necesita el texto final acumulado para devolverlo al orquestador.
+ */
+export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatTurnResult> {
+  return new Promise<ChatTurnResult>((resolveTurn) => {
+    const collected: string[] = []
+    let finalError: string | null = null
+    let finalSession: string | null = null
+
+    const send: SendFn = (payload) => {
+      const ev = payload as {
+        kind?: string
+        text?: string
+        sessionId?: string
+        error?: string
+        message?: string
+      }
+      if (ev.kind === 'text' && ev.text) collected.push(ev.text)
+      else if (ev.kind === 'chunk' && ev.text) {
+        if (collected.length === 0) collected.push('')
+        collected[collected.length - 1] += ev.text
+      } else if (ev.kind === 'init' && ev.sessionId) finalSession = ev.sessionId
+      else if (ev.kind === 'done') {
+        finalSession = ev.sessionId ?? finalSession
+        finalError = ev.error ?? null
+      } else if (ev.kind === 'error') finalError = ev.message ?? 'error'
+      emit(payload)
+    }
+
+    const cmd = buildCommand(opts)
+    const env = {
+      ...process.env,
+      ...bridgeEnv(),
+      BRIDGE_CELL_ID: opts.id,
+      TERM: 'dumb'
+    } as Record<string, string>
+    const child =
+      process.platform === 'win32'
+        ? spawn(cmd, { cwd: opts.cwd, shell: true, env })
+        : spawn(process.env.SHELL || '/bin/bash', ['-lc', cmd], { cwd: opts.cwd, env })
+    running.set(opts.id, child)
+
+    let buf = ''
+    let stderrTail = ''
+    let gotResult = false
+
+    child.stdout.on('data', (d: Buffer) => {
+      if (opts.agent === 'opencode') {
+        send({ kind: 'chunk', text: stripAnsi(d.toString()) })
+        return
+      }
+      buf += d.toString()
+      let nl: number
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim()
+        buf = buf.slice(nl + 1)
+        if (!line) continue
+        try {
+          handleClaudeEvent(JSON.parse(line), send, () => {
+            gotResult = true
+          })
+        } catch {
+          // línea que no es JSON (banners, warnings): ignorar
+        }
+      }
+    })
+
+    child.stderr.on('data', (d: Buffer) => {
+      stderrTail = (stderrTail + d.toString()).slice(-2000)
+    })
+
+    child.on('close', (code) => {
+      running.delete(opts.id)
+      if (opts.agent === 'opencode') {
+        send({
+          kind: 'done',
+          sessionId: 'continue',
+          meta: null,
+          error: code ? stderrTail || `código ${code}` : null
+        })
+      } else if (!gotResult) {
+        send({
+          kind: 'error',
+          message: `claude terminó sin resultado (código ${code}). ${stripAnsi(stderrTail) || '¿Está instalado y autenticado?'}`
+        })
+        if (!finalError) finalError = `claude terminó sin resultado (código ${code})`
+      }
+      resolveTurn({ text: collected.join('\n\n').trim(), error: finalError, sessionId: finalSession })
+    })
+
+    child.on('error', (err) => {
+      running.delete(opts.id)
+      send({ kind: 'error', message: String(err) })
+      resolveTurn({ text: '', error: String(err), sessionId: null })
+    })
+  })
+}
+
 export function registerChatHandlers(): void {
   ipcMain.handle('chat:send', (event, opts: ChatSendOpts) => {
     const wc: WebContents = event.sender
-    const send: SendFn = (payload) => {
+    return executeChatTurn(opts, (payload) => {
       if (!wc.isDestroyed()) wc.send(`chat:event:${opts.id}`, payload)
-    }
-
-    return new Promise<void>((resolveTurn) => {
-      const cmd = buildCommand(opts)
-      const env = { ...process.env, TERM: 'dumb' } as Record<string, string>
-      const child =
-        process.platform === 'win32'
-          ? spawn(cmd, { cwd: opts.cwd, shell: true, env })
-          : spawn(process.env.SHELL || '/bin/bash', ['-lc', cmd], { cwd: opts.cwd, env })
-      running.set(opts.id, child)
-
-      let buf = ''
-      let stderrTail = ''
-      let gotResult = false
-
-      child.stdout.on('data', (d: Buffer) => {
-        if (opts.agent === 'opencode') {
-          send({ kind: 'chunk', text: stripAnsi(d.toString()) })
-          return
-        }
-        buf += d.toString()
-        let nl: number
-        while ((nl = buf.indexOf('\n')) >= 0) {
-          const line = buf.slice(0, nl).trim()
-          buf = buf.slice(nl + 1)
-          if (!line) continue
-          try {
-            handleClaudeEvent(JSON.parse(line), send, () => {
-              gotResult = true
-            })
-          } catch {
-            // línea que no es JSON (banners, warnings): ignorar
-          }
-        }
-      })
-
-      child.stderr.on('data', (d: Buffer) => {
-        stderrTail = (stderrTail + d.toString()).slice(-2000)
-      })
-
-      child.on('close', (code) => {
-        running.delete(opts.id)
-        if (opts.agent === 'opencode') {
-          send({ kind: 'done', sessionId: 'continue', meta: null, error: code ? stderrTail || `código ${code}` : null })
-        } else if (!gotResult) {
-          send({
-            kind: 'error',
-            message: `claude terminó sin resultado (código ${code}). ${stripAnsi(stderrTail) || '¿Está instalado y autenticado?'}`
-          })
-        }
-        resolveTurn()
-      })
-
-      child.on('error', (err) => {
-        running.delete(opts.id)
-        send({ kind: 'error', message: String(err) })
-        resolveTurn()
-      })
-    })
+    }).then(() => undefined)
   })
 
   // Lista las sesiones guardadas de Claude Code para un proyecto, leyendo los

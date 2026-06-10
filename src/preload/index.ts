@@ -38,8 +38,12 @@ const api = {
     return () => ipcRenderer.removeListener(channel, listener)
   },
 
+  /** Sincroniza el estado de las celdas hacia el main (puente de delegación). */
+  syncCells: (cells: unknown[]): void => ipcRenderer.send('cells:sync', cells),
+
   createPty: (opts: {
     id: string
+    cellId?: string
     cwd: string
     command: string | null
     perm?: 'default' | 'flexible' | 'yolo'

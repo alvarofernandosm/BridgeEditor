@@ -4,6 +4,7 @@ import { readdir, stat } from 'fs/promises'
 import { join } from 'path'
 import { homedir } from 'os'
 import { applyPermissions, type PermLevel } from './permissions'
+import { bridgeEnv } from './bridge-state'
 
 const sessions = new Map<string, pty.IPty>()
 
@@ -72,6 +73,7 @@ export function registerPtyHandlers(): void {
       event,
       opts: {
         id: string
+        cellId?: string
         cwd: string
         command: string | null
         perm?: PermLevel
@@ -104,6 +106,8 @@ export function registerPtyHandlers(): void {
         env: {
           ...process.env,
           ...permEnv,
+          ...bridgeEnv(),
+          ...(opts.cellId ? { BRIDGE_CELL_ID: opts.cellId } : {}),
           TERM: 'xterm-256color',
           COLORTERM: 'truecolor'
         } as Record<string, string>

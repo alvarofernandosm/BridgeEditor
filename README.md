@@ -135,6 +135,28 @@ mezclar chats, terminales y visores en la misma grilla.
   de `.claude/commands/` funcionan; los integrados del TUI (`/compact`, etc.)
   no existen en modo headless.
 
+## Delegación entre celdas (multi-agente)
+
+BridgeEditor levanta un puente HTTP local (solo `127.0.0.1`, con token por
+sesión) que permite que el agente de una celda **delegue trabajo a los agentes
+de otras celdas** y reciba sus respuestas — p. ej. Claude en la celda 1
+orquestando a OpenCode con otros modelos en las celdas 2 y 3.
+
+- Cada agente recibe `BRIDGE_API`, `BRIDGE_TOKEN` y `BRIDGE_CELL_ID` en su
+  entorno, y un **skill** (`~/.claude/skills/bridge-cells/`) le enseña a
+  Claude a usarlos: `GET /cells` lista las celdas, `POST /delegate` envía una
+  tarea y bloquea hasta la respuesta.
+- **La primera delegación pide tu permiso** con un diálogo (permitir siempre /
+  una vez / denegar), por par origen→destino.
+- El turno delegado **se ve en vivo en el chat de la celda destino** con la
+  etiqueta 📨 de quién lo envió; la respuesta vuelve al orquestador como JSON.
+- Solo las celdas en **modo chat** aceptan delegación (el TUI no tiene salida
+  estructurada); las ocupadas devuelven 409.
+
+Pruébalo: abre un chat de Claude en la celda 1 y chats de OpenCode en la 2 y
+la 3, y dile a Claude: *"lista las celdas disponibles y delega X a la celda 2
+y Y a la 3, luego intégrame los resultados"*.
+
 ## Visor de archivos
 
 Una celda también puede abrir un archivo (**📄 Abrir archivo** en el launcher):

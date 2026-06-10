@@ -348,8 +348,16 @@ function TerminalView({
     let lastOutput = 0
     let burstStart = 0
     let working = false
-    window.bridge
-      .createPty({ id: ptyId, cwd, command, perm, resumeSession, cols: term.cols, rows: term.rows })
+    window.bridge.createPty({
+      id: ptyId,
+      cellId,
+      cwd,
+      command,
+      perm,
+      resumeSession,
+      cols: term.cols,
+      rows: term.rows
+    })
       .then(() => {
         if (disposed) {
           window.bridge.kill(ptyId)

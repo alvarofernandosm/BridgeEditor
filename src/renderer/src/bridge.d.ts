@@ -3,6 +3,8 @@ export {}
 declare global {
   type ChatEvent =
     | { kind: 'init'; sessionId: string }
+    | { kind: 'remote-user'; text: string; from: string }
+    | { kind: 'turn-start' }
     | { kind: 'text'; text: string }
     | { kind: 'chunk'; text: string }
     | { kind: 'tool'; name: string; detail: string }
@@ -27,8 +29,10 @@ declare global {
       chatCancel(id: string): void
       chatSessions(cwd: string): Promise<Array<{ id: string; mtimeMs: number; summary: string }>>
       onChatEvent(id: string, cb: (ev: ChatEvent) => void): () => void
+      syncCells(cells: unknown[]): void
       createPty(opts: {
         id: string
+        cellId?: string
         cwd: string
         command: string | null
         perm?: 'default' | 'flexible' | 'yolo'

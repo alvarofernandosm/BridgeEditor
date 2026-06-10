@@ -461,6 +461,22 @@ body {
   white-space: pre-wrap;
 }
 
+.chat-user-remote {
+  align-self: flex-start;
+  background: rgba(227, 179, 65, 0.1);
+  border-color: rgba(227, 179, 65, 0.4);
+  border-radius: 10px 10px 10px 2px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.chat-remote-from {
+  font-size: 10.5px;
+  color: #e3b341;
+  font-weight: 600;
+}
+
 .chat-assistant {
   align-self: stretch;
   font-size: 13px;
