@@ -3,7 +3,7 @@ import { renderMarkdown } from './highlight'
 import type { AgentKind } from './App'
 
 interface ChatMsg {
-  role: 'user' | 'remote-user' | 'assistant' | 'tool' | 'meta' | 'error'
+  role: 'user' | 'remote-user' | 'assistant' | 'thinking' | 'tool' | 'meta' | 'error'
   text: string
   name?: string
 }
@@ -92,6 +92,9 @@ export function ChatView({
           break
         case 'text':
           setMessages((ms) => [...ms, { role: 'assistant', text: ev.text }])
+          break
+        case 'thinking':
+          setMessages((ms) => [...ms, { role: 'thinking', text: ev.text }])
           break
         case 'chunk':
           setMessages((ms) => {
@@ -259,6 +262,14 @@ export function ChatView({
                 className="chat-assistant md-body"
                 dangerouslySetInnerHTML={{ __html: renderMarkdown(m.text) }}
               />
+            )
+          }
+          if (m.role === 'thinking') {
+            return (
+              <details key={i} className="chat-thinking">
+                <summary>🧠 razonamiento</summary>
+                <div>{m.text}</div>
+              </details>
             )
           }
           if (m.role === 'tool') {

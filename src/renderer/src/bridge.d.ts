@@ -6,6 +6,7 @@ declare global {
     | { kind: 'remote-user'; text: string; from: string }
     | { kind: 'turn-start' }
     | { kind: 'text'; text: string }
+    | { kind: 'thinking'; text: string }
     | { kind: 'chunk'; text: string }
     | { kind: 'tool'; name: string; detail: string }
     | { kind: 'done'; sessionId: string | null; meta?: string | null; error?: string | null }

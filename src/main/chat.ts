@@ -94,6 +94,8 @@ function handleClaudeEvent(ev: any, send: SendFn, markResult: () => void): void 
     for (const block of ev.message.content) {
       if (block.type === 'text' && block.text?.trim()) {
         send({ kind: 'text', text: block.text })
+      } else if (block.type === 'thinking' && typeof block.thinking === 'string' && block.thinking.trim()) {
+        send({ kind: 'thinking', text: block.thinking })
       } else if (block.type === 'tool_use') {
         const input = block.input ?? {}
         const detail =
@@ -109,10 +111,19 @@ function handleClaudeEvent(ev: any, send: SendFn, markResult: () => void): void 
     }
   } else if (ev.type === 'result') {
     markResult()
-    const meta =
-      ev.total_cost_usd != null
-        ? `$${Number(ev.total_cost_usd).toFixed(4)} · ${Math.round((ev.duration_ms ?? 0) / 1000)}s`
-        : null
+    const fmtTokens = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))
+    const parts: string[] = []
+    if (ev.total_cost_usd != null) parts.push(`$${Number(ev.total_cost_usd).toFixed(4)}`)
+    if (ev.duration_ms != null) parts.push(`${Math.round(ev.duration_ms / 1000)}s`)
+    const usage = ev.usage
+    if (usage) {
+      const inputTokens =
+        (usage.input_tokens ?? 0) +
+        (usage.cache_read_input_tokens ?? 0) +
+        (usage.cache_creation_input_tokens ?? 0)
+      parts.push(`↑${fmtTokens(inputTokens)} ↓${fmtTokens(usage.output_tokens ?? 0)} tok`)
+    }
+    const meta = parts.length > 0 ? parts.join(' · ') : null
     send({
       kind: 'done',
       sessionId: ev.session_id ?? null,
