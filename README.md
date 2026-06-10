@@ -126,6 +126,10 @@ mezclar chats, terminales y visores en la misma grilla.
   **sobrevive reinicios de la app** (la sesión de claude se guarda en el layout).
 - Selector de permisos por chat (solo claude): *solo planear*, *acepta
   ediciones* (default) o *sin preguntar*.
+- **Selector de modelo por chat**: en OpenCode lista los modelos reales de tu
+  instalación (`opencode models`); en Claude, los alias (`fable`, `opus`,
+  `sonnet`, `haiku`). Se guarda con el layout y la delegación entre celdas
+  respeta el modelo elegido de cada celda.
 - `Enter` envía, `Shift+Enter` hace salto de línea, y hay botón Cancelar
   mientras el agente trabaja.
 - **Slash commands del chat**: `/resume` abre un selector visual de sesiones

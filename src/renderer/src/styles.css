@@ -670,6 +670,10 @@ body {
   align-self: center;
 }
 
+.chat-model {
+  max-width: 170px;
+}
+
 .chat-composer textarea {
   flex: 1;
   resize: none;

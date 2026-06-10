@@ -166,6 +166,8 @@ export function TerminalCell({
                 cell.perm === 'flexible' ? 'flexible' : cell.perm === 'yolo' ? 'full' : 'edits'
               }
               sessionId={cell.chatSessionId}
+              model={cell.chatModel}
+              onModel={(m) => onUpdate(cell.id, { chatModel: m })}
               onSessionId={(sid) => onUpdate(cell.id, { chatSessionId: sid })}
               onActivity={(activity) => onUpdate(cell.id, { activity })}
               onAttention={() => onUpdate(cell.id, { attention: true })}

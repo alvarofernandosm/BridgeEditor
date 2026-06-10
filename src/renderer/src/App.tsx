@@ -19,6 +19,8 @@ export interface CellState {
   termSessionId: string | null
   /** Sesión de claude para --resume entre turnos (y entre reinicios). */
   chatSessionId: string | null
+  /** Modelo elegido para el chat (alias de claude o provider/model de opencode). */
+  chatModel: string | null
   /** Ruta del archivo abierto cuando la celda es un visor (status 'file'). */
   file: string | null
   cwd: string
@@ -43,6 +45,7 @@ const newCell = (): CellState => ({
   resume: false,
   termSessionId: null,
   chatSessionId: null,
+  chatModel: null,
   file: null,
   cwd: '',
   status: 'launcher',
@@ -60,6 +63,7 @@ interface SavedCell {
   perm?: PermLevel
   termSessionId?: string | null
   chatSessionId?: string | null
+  chatModel?: string | null
   file: string | null
   cwd: string
 }
@@ -84,6 +88,7 @@ function loadSavedLayout(): CellState[] | null {
         resume: agent !== null && agent !== 'shell' && s.mode !== 'chat',
         termSessionId: typeof s.termSessionId === 'string' ? s.termSessionId : null,
         chatSessionId: typeof s.chatSessionId === 'string' ? s.chatSessionId : null,
+        chatModel: typeof s.chatModel === 'string' ? s.chatModel : null,
         file,
         cwd: typeof s.cwd === 'string' ? s.cwd : '',
         status: file ? 'file' : agent ? 'running' : 'launcher',
@@ -137,6 +142,7 @@ export default function App(): JSX.Element {
         cwd: c.cwd,
         perm: c.perm,
         chatSessionId: c.chatSessionId,
+        chatModel: c.chatModel,
         busy: c.activity === 'working'
       }))
     )
@@ -149,6 +155,7 @@ export default function App(): JSX.Element {
       perm: c.perm,
       termSessionId: c.termSessionId,
       chatSessionId: c.chatSessionId,
+      chatModel: c.chatModel,
       file: c.file,
       cwd: c.cwd
     }))

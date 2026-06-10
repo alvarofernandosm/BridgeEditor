@@ -24,7 +24,11 @@ const api = {
     message: string
     sessionId: string | null
     permissionMode: 'plan' | 'edits' | 'flexible' | 'full'
+    model?: string | null
   }): Promise<void> => ipcRenderer.invoke('chat:send', opts),
+
+  chatModels: (agent: 'claude' | 'opencode'): Promise<string[]> =>
+    ipcRenderer.invoke('chat:models', agent),
 
   chatCancel: (id: string): void => ipcRenderer.send('chat:cancel', { id }),
 

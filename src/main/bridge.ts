@@ -21,6 +21,7 @@ interface CellInfo {
   cwd: string
   perm: 'default' | 'flexible' | 'yolo'
   chatSessionId: string | null
+  chatModel: string | null
   busy: boolean
 }
 
@@ -100,6 +101,7 @@ export function registerBridge(getWindow: () => BrowserWindow | null): void {
           agent: c.agent,
           mode: c.mode,
           cwd: c.cwd,
+          model: c.chatModel,
           busy: c.busy || delegating.has(c.id),
           acceptsDelegation: c.mode === 'chat' && c.agent !== null && c.agent !== 'shell'
         }))
@@ -151,7 +153,8 @@ export function registerBridge(getWindow: () => BrowserWindow | null): void {
             cwd: target.cwd,
             message,
             sessionId: target.chatSessionId,
-            permissionMode: PERM_MAP[target.perm] ?? 'edits'
+            permissionMode: PERM_MAP[target.perm] ?? 'edits',
+            model: target.chatModel
           },
           emit
         )

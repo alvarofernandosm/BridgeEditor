@@ -17,6 +17,8 @@ interface ChatViewProps {
   active: boolean
   initialPerm: ChatPerm
   sessionId: string | null
+  model: string | null
+  onModel: (model: string | null) => void
   onSessionId: (id: string | null) => void
   onActivity: (activity: 'working' | 'idle') => void
   onAttention: () => void
@@ -47,6 +49,8 @@ export function ChatView({
   active,
   initialPerm,
   sessionId,
+  model,
+  onModel,
   onSessionId,
   onActivity,
   onAttention
@@ -61,6 +65,11 @@ export function ChatView({
   const [elapsed, setElapsed] = useState(0)
   const [permMode, setPermMode] = useState<ChatPerm>(initialPerm)
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null)
+  const [models, setModels] = useState<string[]>([])
+
+  useEffect(() => {
+    window.bridge.chatModels(agent).then(setModels)
+  }, [agent])
   const listRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const sessionRef = useRef(sessionId)
@@ -201,7 +210,15 @@ export function ChatView({
     setRunning(true)
     onActivity('working')
     window.bridge
-      .chatSend({ id: cellId, agent, cwd, message, sessionId: sessionRef.current, permissionMode: permMode })
+      .chatSend({
+        id: cellId,
+        agent,
+        cwd,
+        message,
+        sessionId: sessionRef.current,
+        permissionMode: permMode,
+        model
+      })
       .catch((e) => {
         setRunning(false)
         onActivity('idle')
@@ -316,6 +333,21 @@ export function ChatView({
             {(Object.keys(PERM_LABELS) as Array<keyof typeof PERM_LABELS>).map((k) => (
               <option key={k} value={k}>
                 {PERM_LABELS[k]}
+              </option>
+            ))}
+          </select>
+        )}
+        {models.length > 0 && (
+          <select
+            className="chat-model"
+            value={model ?? ''}
+            title="Modelo de este chat"
+            onChange={(e) => onModel(e.target.value || null)}
+          >
+            <option value="">modelo por defecto</option>
+            {models.map((m) => (
+              <option key={m} value={m}>
+                {m}
               </option>
             ))}
           </select>

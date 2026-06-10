@@ -25,7 +25,9 @@ declare global {
         message: string
         sessionId: string | null
         permissionMode: 'plan' | 'edits' | 'flexible' | 'full'
+        model?: string | null
       }): Promise<void>
+      chatModels(agent: 'claude' | 'opencode'): Promise<string[]>
       chatCancel(id: string): void
       chatSessions(cwd: string): Promise<Array<{ id: string; mtimeMs: number; summary: string }>>
       onChatEvent(id: string, cb: (ev: ChatEvent) => void): () => void

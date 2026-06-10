@@ -22,6 +22,8 @@ export interface ChatSendOpts {
   message: string
   sessionId: string | null
   permissionMode: 'plan' | 'edits' | 'flexible' | 'full'
+  /** Modelo a usar (alias de claude o provider/model de opencode); null = el por defecto. */
+  model?: string | null
 }
 
 export interface ChatTurnResult {
@@ -33,6 +35,7 @@ export interface ChatTurnResult {
 function buildCommand(opts: ChatSendOpts): string {
   if (opts.agent === 'claude') {
     const flags = ['-p', shellQuote(opts.message), '--output-format', 'stream-json', '--verbose']
+    if (opts.model) flags.push('--model', shellQuote(opts.model))
     if (opts.sessionId) flags.push('--resume', shellQuote(opts.sessionId))
     if (opts.permissionMode === 'full') flags.push('--dangerously-skip-permissions')
     else if (opts.permissionMode === 'plan') flags.push('--permission-mode', 'plan')
@@ -42,7 +45,42 @@ function buildCommand(opts: ChatSendOpts): string {
     return `claude ${flags.join(' ')}`
   }
   const cont = opts.sessionId ? '--continue ' : ''
-  return `opencode run ${cont}${shellQuote(opts.message)}`
+  const model = opts.model ? `--model ${shellQuote(opts.model)} ` : ''
+  return `opencode run ${cont}${model}${shellQuote(opts.message)}`
+}
+
+// Lista de modelos por agente: claude usa sus alias; opencode los expone con
+// `opencode models` (provider/model). Se cachea por arranque.
+let opencodeModelsCache: string[] | null = null
+
+export async function listChatModels(agent: 'claude' | 'opencode'): Promise<string[]> {
+  if (agent === 'claude') return ['fable', 'opus', 'sonnet', 'haiku']
+  if (opencodeModelsCache) return opencodeModelsCache
+  return new Promise((resolve) => {
+    const child =
+      process.platform === 'win32'
+        ? spawn('opencode models', { shell: true })
+        : spawn(process.env.SHELL || '/bin/bash', ['-lc', 'opencode models'])
+    let out = ''
+    const timer = setTimeout(() => {
+      child.kill()
+      resolve([])
+    }, 20000)
+    child.stdout?.on('data', (d: Buffer) => (out += d.toString()))
+    child.on('close', () => {
+      clearTimeout(timer)
+      const models = stripAnsi(out)
+        .split('\n')
+        .map((l) => l.trim())
+        .filter((l) => l.includes('/') && !l.includes(' '))
+      if (models.length > 0) opencodeModelsCache = models
+      resolve(models)
+    })
+    child.on('error', () => {
+      clearTimeout(timer)
+      resolve([])
+    })
+  })
 }
 
 type SendFn = (payload: unknown) => void
@@ -193,6 +231,8 @@ export function registerChatHandlers(): void {
       if (!wc.isDestroyed()) wc.send(`chat:event:${opts.id}`, payload)
     }).then(() => undefined)
   })
+
+  ipcMain.handle('chat:models', (_event, agent: 'claude' | 'opencode') => listChatModels(agent))
 
   // Lista las sesiones guardadas de Claude Code para un proyecto, leyendo los
   // .jsonl de ~/.claude/projects/<ruta-codificada>/. Soporta el /resume del chat.
