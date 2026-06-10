@@ -170,21 +170,24 @@ export default function App(): JSX.Element {
   // El puente puede pedir abrir una celda nueva (POST /open-cell).
   useEffect(() => {
     return window.bridge.onOpenCellRequest((spec) => {
-      let createdId: string | null = null
+      // El id se decide ANTES del setCells: su updater es asíncrono, así que
+      // leerlo después devolvería null al puente.
+      const cell: CellState = {
+        ...newCell(),
+        agent: spec.agent,
+        mode: 'chat',
+        cwd: spec.cwd,
+        chatModel: spec.model,
+        status: 'running'
+      }
+      let accepted = false
       setCells((cs) => {
         if (cs.length >= MAX_CELLS) return cs
-        const cell: CellState = {
-          ...newCell(),
-          agent: spec.agent,
-          mode: 'chat',
-          cwd: spec.cwd,
-          chatModel: spec.model,
-          status: 'running'
-        }
-        createdId = cell.id
+        accepted = true
         return [...cs, cell]
       })
-      window.bridge.openCellResponse(spec.requestId, createdId)
+      // setCells aplica en el siguiente tick; respondemos tras él.
+      setTimeout(() => window.bridge.openCellResponse(spec.requestId, accepted ? cell.id : null), 0)
     })
   }, [])
 
