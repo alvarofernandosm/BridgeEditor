@@ -114,9 +114,11 @@ export default function App(): JSX.Element {
   const [activeId, setActiveId] = useState<string | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [home, setHome] = useState('')
+  const [version, setVersion] = useState('')
 
   useEffect(() => {
     window.bridge.homeDir().then(setHome)
+    window.bridge.appVersion().then(setVersion)
   }, [])
 
   // Sin esto, soltar un archivo fuera de una zona de drop navegaría a file://
@@ -346,6 +348,7 @@ export default function App(): JSX.Element {
       <header className="topbar">
         <div className="brand">
           Bridge<span>Editor</span>
+          {version && <span className="brand-version">v{version}</span>}
         </div>
         <span className="hint">Ctrl+1…6 celdas · Ctrl+Shift+P paleta</span>
         <div className="spacer" />

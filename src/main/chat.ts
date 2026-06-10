@@ -60,7 +60,7 @@ export async function listChatModels(agent: 'claude' | 'opencode'): Promise<stri
     const child =
       process.platform === 'win32'
         ? spawn('opencode models', { shell: true })
-        : spawn(process.env.SHELL || '/bin/bash', ['-lc', 'opencode models'])
+        : spawn(process.env.SHELL || '/bin/bash', ['-ilc', 'opencode models'])
     let out = ''
     const timer = setTimeout(() => {
       child.kill()
@@ -162,10 +162,13 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
       BRIDGE_CELL_ID: opts.id,
       TERM: 'dumb'
     } as Record<string, string>
+    // -ilc (login + interactivo): garantiza el PATH del usuario aunque la app
+    // se lance desde el menú de aplicaciones (nvm y similares viven en .bashrc,
+    // que los shells no interactivos se saltan).
     const child =
       process.platform === 'win32'
         ? spawn(cmd, { cwd: opts.cwd, shell: true, env })
-        : spawn(process.env.SHELL || '/bin/bash', ['-lc', cmd], { cwd: opts.cwd, env })
+        : spawn(process.env.SHELL || '/bin/bash', ['-ilc', cmd], { cwd: opts.cwd, env })
     running.set(opts.id, child)
 
     let buf = ''
@@ -194,7 +197,13 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
     })
 
     child.stderr.on('data', (d: Buffer) => {
-      stderrTail = (stderrTail + d.toString()).slice(-2000)
+      // ruido esperable del shell -i sin TTY
+      const clean = d
+        .toString()
+        .split('\n')
+        .filter((l) => !l.includes('job control') && !l.includes('process group'))
+        .join('\n')
+      stderrTail = (stderrTail + clean).slice(-2000)
     })
 
     child.on('close', (code) => {

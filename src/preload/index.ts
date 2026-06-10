@@ -89,6 +89,8 @@ const api = {
 
   homeDir: (): Promise<string> => ipcRenderer.invoke('app:homeDir'),
 
+  appVersion: (): Promise<string> => ipcRenderer.invoke('app:version'),
+
   pickFile: (): Promise<string | null> => ipcRenderer.invoke('dialog:pickFile'),
 
   readFile: (path: string): Promise<string> => ipcRenderer.invoke('file:read', path),

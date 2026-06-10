@@ -50,6 +50,7 @@ declare global {
       onExit(id: string, cb: (code: number) => void): () => void
       pickDirectory(): Promise<string | null>
       homeDir(): Promise<string>
+      appVersion(): Promise<string>
       pickFile(): Promise<string | null>
       readFile(path: string): Promise<string>
       writeFile(path: string, content: string): Promise<void>

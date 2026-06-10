@@ -128,6 +128,7 @@ app.whenReady().then(() => {
   })
 
   ipcMain.handle('app:homeDir', () => os.homedir())
+  ipcMain.handle('app:version', () => app.getVersion())
 
   createWindow()
 

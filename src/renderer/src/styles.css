@@ -78,6 +78,13 @@ body {
   color: var(--accent);
 }
 
+.brand-version {
+  color: var(--muted) !important;
+  font-size: 10px;
+  font-weight: 400;
+  margin-left: 6px;
+}
+
 .hint {
   color: var(--muted);
   font-size: 11px;
