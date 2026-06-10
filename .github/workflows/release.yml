@@ -36,9 +36,26 @@ jobs:
       - name: Compilar la app
         run: npm run build
 
+      # Si existen los secrets de Apple (MAC_CERT_P12 + credenciales de
+      # notarización), el build de macOS sale firmado y notarizado; si no,
+      # se empaqueta sin firmar como siempre (workaround: xattr -cr).
       - name: Empaquetar y publicar en el Release
-        run: npx electron-builder --publish always
+        shell: bash
+        run: |
+          EXTRA=""
+          if [ "$RUNNER_OS" = "macOS" ] && [ -n "$MAC_CERT_P12" ]; then
+            echo "Certificado presente: firma y notarización de macOS ACTIVADAS"
+            export CSC_LINK="$MAC_CERT_P12"
+            export CSC_KEY_PASSWORD="$MAC_CERT_PASSWORD"
+            EXTRA="-c.mac.notarize=true"
+          else
+            export CSC_IDENTITY_AUTO_DISCOVERY=false
+          fi
+          npx electron-builder --publish always $EXTRA
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # sin certificado de firma de Apple: empaquetar sin firmar
-          CSC_IDENTITY_AUTO_DISCOVERY: false
+          MAC_CERT_P12: ${{ secrets.MAC_CERT_P12 }}
+          MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}

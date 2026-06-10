@@ -24,6 +24,12 @@ mac:
   category: public.app-category.developer-tools
   target:
     - dmg
+  # Solo aplican cuando hay certificado (CSC_LINK en CI); sin él se empaqueta
+  # sin firmar como siempre.
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
 win:
   executableName: BridgeEditor
   target:
