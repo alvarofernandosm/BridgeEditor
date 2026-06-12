@@ -128,11 +128,18 @@ async function delegateToCell(params: {
   const fromLabel = fromLabelOf(params.fromCellId)
 
   // Delegación que cruza de proyecto (cwd destino no relacionado con el del
-  // origen): el diálogo aparece SIEMPRE — incluso con "permitir siempre" del
-  // par o con aprobación por clic — y con advertencia explícita de rutas.
+  // origen): el diálogo aparece incluso con "permitir siempre" del par o con
+  // aprobación por clic — y con advertencia explícita de rutas.
   const crossProject = fromCell ? !sameProject(fromCell.cwd, target.cwd) : false
 
-  if (!params.skipPermission || crossProject) {
+  // El nivel de permisos de la celda ORIGEN relaja el diálogo: "sin preguntar"
+  // (yolo) nunca pregunta — ni cruzando de proyecto —; "flexible" no pregunta
+  // dentro del mismo proyecto. Sin celda origen conocida no hay nivel que
+  // aplicar y se pregunta como siempre.
+  const originPerm = fromCell?.perm ?? 'default'
+  const autoApproved = originPerm === 'yolo' || (originPerm === 'flexible' && !crossProject)
+
+  if (!autoApproved && (!params.skipPermission || crossProject)) {
     const verb = isChatTarget ? 'delegar trabajo en' : 'consultar la conversación de'
     const warn = crossProject
       ? `\n\n⚠️ OJO: la celda ${target.index} trabaja en OTRO proyecto.\n` +
@@ -154,7 +161,7 @@ async function delegateToCell(params: {
   recordActivity({
     cellId: target.id,
     kind: 'delegation',
-    detail: `${crossProject ? '⚠ otro proyecto · ' : ''}${fromLabel} → celda ${target.index}: ${params.message.replace(/\s+/g, ' ').slice(0, 100)}`
+    detail: `${crossProject ? '⚠ otro proyecto · ' : ''}${autoApproved ? `auto (${originPerm === 'yolo' ? 'sin preguntar' : 'flexible'}) · ` : ''}${fromLabel} → celda ${target.index}: ${params.message.replace(/\s+/g, ' ').slice(0, 100)}`
   })
 
   delegating.add(target.id)
@@ -378,14 +385,18 @@ export function registerBridge(getWindow: () => BrowserWindow | null): void {
       const cwd = typeof body.cwd === 'string' && body.cwd ? body.cwd : (fromCell?.cwd ?? homedir())
       const message = typeof body.message === 'string' ? body.message.trim() : ''
 
-      const ok = await askPermission(
-        fromLabel,
-        `${fromLabel}→open-cell`,
-        `${fromLabel} quiere abrir una celda nueva de chat con ${agent}` +
-          `${model ? ` (${model}${effort ? `, effort ${effort}` : ''})` : effort ? ` (effort ${effort})` : ''}`,
-        `Directorio: ${cwd}${message ? `\n\nY asignarle esta tarea:\n${message.slice(0, 300)}` : ''}`
-      )
-      if (!ok) return json(res, 403, { error: 'el usuario denegó abrir la celda' })
+      // Solo "sin preguntar" (yolo) en la celda origen se salta este diálogo;
+      // "flexible" sí pregunta: abrir celdas es más invasivo que delegar.
+      if (fromCell?.perm !== 'yolo') {
+        const ok = await askPermission(
+          fromLabel,
+          `${fromLabel}→open-cell`,
+          `${fromLabel} quiere abrir una celda nueva de chat con ${agent}` +
+            `${model ? ` (${model}${effort ? `, effort ${effort}` : ''})` : effort ? ` (effort ${effort})` : ''}`,
+          `Directorio: ${cwd}${message ? `\n\nY asignarle esta tarea:\n${message.slice(0, 300)}` : ''}`
+        )
+        if (!ok) return json(res, 403, { error: 'el usuario denegó abrir la celda' })
+      }
 
       const cellId = await requestOpenCell({ agent, model, effort, cwd })
       if (!cellId) return json(res, 502, { error: 'no se pudo crear la celda' })
@@ -479,6 +490,26 @@ Si la celda destino trabaja en un directorio NO relacionado con el tuyo
 (otro proyecto), el usuario verá un diálogo de advertencia. Prefiere celdas
 del mismo proyecto; para trabajar en otro proyecto es mejor abrir una celda
 nueva con el \`cwd\` correcto (/open-cell) o avisarle al usuario.
+
+Que aparezca diálogo de permiso depende del nivel de permisos de TU celda
+(lo eligió el usuario al lanzarla): con "sin preguntar" ninguna comunicación
+entre celdas pide permiso (tampoco /open-cell); con "flexible" delegar dentro
+del mismo proyecto no pregunta (cruzar de proyecto y /open-cell sí); con
+"preguntar todo" siempre hay diálogo. En todos los casos un \`403\` significa
+que el usuario denegó.
+
+Las celdas de chat ejecutan TURNOS HEADLESS: el proceso del agente muere al
+terminar cada turno. Pide tareas que terminen dentro del turno y desconfía de
+respuestas tipo "sigo trabajando en segundo plano" — ese trabajo no existe ya.
+Si la tarea es grande, divídela en delegaciones sucesivas. Tampoco hay TTY:
+al delegar, indica usar banderas no interactivas (--yes/--force) porque las
+preguntas y/N de las herramientas abortan solas.
+
+Coordina SIN ruido: cada delegación cuesta un turno completo de la celda.
+Si una tarea quedó bloqueada y se desbloqueó (p. ej. git stash hecho), manda
+UNA sola delegación que diga qué cambió y qué hacer ahora — no repitas
+mensajes de estado ni preguntes "¿cómo vas?" (usa GET /activity para eso).
+La celda no comparte tu contexto: cada mensaje debe ser autocontenido.
 
 Por defecto la celda destino CONTINÚA su conversación (recuerda lo anterior).
 Para una tarea independiente que no necesita ese contexto, agrega

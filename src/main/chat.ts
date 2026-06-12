@@ -1,7 +1,7 @@
 import { app, ipcMain, type WebContents } from 'electron'
 import { spawn, type ChildProcess } from 'child_process'
 import { readFileSync, writeFileSync } from 'fs'
-import { readdir, stat, open } from 'fs/promises'
+import { readdir, readFile, stat, open } from 'fs/promises'
 import { join } from 'path'
 import { homedir } from 'os'
 import { claudeFlexibleSettingsPath } from './permissions'
@@ -37,6 +37,20 @@ export interface ChatTurnResult {
   sessionId: string | null
 }
 
+// Reglas del entorno headless por turnos: sin esto los agentes lanzan
+// subagentes/tareas "en segundo plano" y cierran el turno esperándolas —
+// pero el proceso muere al terminar el turno y quedan esperando para siempre.
+const HEADLESS_NOTE =
+  'Corres como chat headless por turnos dentro de BridgeEditor: el proceso ' +
+  'termina cuando termina tu turno. NUNCA dejes tareas, subagentes ni comandos ' +
+  'en segundo plano "para después" (morirán al cerrar el turno). Ejecuta todo ' +
+  'en primer plano, espera los resultados de tus subagentes DENTRO del turno y ' +
+  'entrega la respuesta completa antes de terminar. Además NO hay TTY ni stdin: ' +
+  'los comandos que hacen preguntas interactivas (y/N, selectores) toman su ' +
+  'default y suelen abortar — usa siempre banderas no interactivas (--yes, -y, ' +
+  '--force, --non-interactive) y verifica precondiciones antes (p. ej. git ' +
+  'status limpio antes de codemods).'
+
 function buildCommand(opts: ChatSendOpts): string {
   if (opts.agent === 'antigravity') {
     // agy -p: print no-interactivo. No hay salida JSON: el texto plano se
@@ -49,6 +63,7 @@ function buildCommand(opts: ChatSendOpts): string {
   }
   if (opts.agent === 'claude') {
     const flags = ['-p', shellQuote(opts.message), '--output-format', 'stream-json', '--verbose']
+    flags.push('--append-system-prompt', shellQuote(HEADLESS_NOTE))
     if (opts.model) flags.push('--model', shellQuote(opts.model))
     if (opts.effort) flags.push('--effort', shellQuote(opts.effort))
     if (opts.sessionId) flags.push('--resume', shellQuote(opts.sessionId))
@@ -67,7 +82,8 @@ function buildCommand(opts: ChatSendOpts): string {
     : ''
   const model = opts.model ? `--model ${shellQuote(opts.model)} ` : ''
   const variant = opts.effort ? `--variant ${shellQuote(opts.effort)} ` : ''
-  return `opencode run --format json ${session}${model}${variant}${shellQuote(opts.message)}`
+  // --thinking: sin él opencode omite los eventos "reasoning" del stream
+  return `opencode run --format json --thinking ${session}${model}${variant}${shellQuote(opts.message)}`
 }
 
 const fmtTokens = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))
@@ -174,6 +190,13 @@ function handleClaudeEvent(ev: any, send: SendFn, markResult: () => void): void 
         send({ kind: 'thinking', text: block.thinking })
       } else if (block.type === 'tool_use') {
         const input = block.input ?? {}
+        // Subagentes (Task): chip propio para que se vea quién está trabajando.
+        if (block.name === 'Task') {
+          const kind = typeof input.subagent_type === 'string' ? ` (${input.subagent_type})` : ''
+          const what = input.description ?? (typeof input.prompt === 'string' ? input.prompt.slice(0, 100) : '')
+          send({ kind: 'tool', name: `Subagente${kind}`, detail: String(what).slice(0, 140) })
+          continue
+        }
         const detail =
           input.command ??
           input.file_path ??
@@ -246,6 +269,33 @@ function rememberAgyTranscript(convId: string, full: string): void {
 }
 
 const AGY_CONV_DIR = join(homedir(), '.gemini', 'antigravity-cli', 'conversations')
+const AGY_LOG_DIR = join(homedir(), '.gemini', 'antigravity-cli', 'log')
+
+// agy -p tiene un defecto serio: ante errores del backend (cuota agotada,
+// auth vencida…) sale con código 0 y stdout vacío. El error real solo queda
+// en su log: lo rescatamos para mostrárselo al usuario en el chat.
+async function lastAgyError(sinceMs: number): Promise<string | null> {
+  try {
+    const names = await readdir(AGY_LOG_DIR)
+    let best: { name: string; mtime: number } | null = null
+    for (const name of names) {
+      const st = await stat(join(AGY_LOG_DIR, name)).catch(() => null)
+      if (!st || st.mtimeMs < sinceMs - 2000) continue
+      if (!best || st.mtimeMs > best.mtime) best = { name, mtime: st.mtimeMs }
+    }
+    if (!best) return null
+    const content = await readFile(join(AGY_LOG_DIR, best.name), 'utf8')
+    const errLines = content
+      .split('\n')
+      .filter((l) => /agent executor error|RESOURCE_EXHAUSTED|PERMISSION_DENIED|UNAUTHENTICATED|not logged in/i.test(l))
+    const last = errLines[errLines.length - 1]
+    if (!last) return null
+    // quitar el prefijo glog (E0610 16:08:01.883799 25381 log.go:398])
+    return last.replace(/^[EWIF]\d{4} [\d:.]+\s+\d+ [^\]]+\]\s*/, '').slice(0, 300)
+  } catch {
+    return null
+  }
+}
 
 // El id de una conversación nueva es el nombre del archivo .db/.pb más
 // reciente en el directorio de conversaciones (mismo truco que el rastreo
@@ -387,11 +437,20 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
         if (prev && full.startsWith(prev)) text = full.slice(prev.length).trim()
         if (convId) rememberAgyTranscript(convId, full)
         if (text) send({ kind: 'text', text })
+        let error: string | null = code
+          ? stripAnsi(stderrTail) || `agy terminó con código ${code}`
+          : null
+        if (!error && !text) {
+          // agy "exitoso" pero mudo: rescatar el error real de su log
+          error =
+            (await lastAgyError(startTime)) ??
+            'agy no devolvió respuesta (sin error reportado; revisa ~/.gemini/antigravity-cli/log)'
+        }
         send({
           kind: 'done',
           sessionId: convId,
           meta: `${Math.round((Date.now() - startTime) / 1000)}s`,
-          error: code ? stripAnsi(stderrTail) || `agy terminó con código ${code}` : null
+          error
         })
         resolveTurn({ text: collected.join('\n\n').trim(), error: finalError, sessionId: finalSession })
         return

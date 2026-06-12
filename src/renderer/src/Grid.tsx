@@ -1,7 +1,23 @@
-import { useState, type CSSProperties } from 'react'
+import { useEffect, useState, type CSSProperties } from 'react'
 import type { CellState } from './App'
 import { TerminalCell } from './TerminalCell'
 import { CELL_MIME } from './dnd'
+
+// Orientación de la VENTANA (no del monitor): si la ventana queda más alta
+// que ancha (monitor vertical, o media pantalla en uno horizontal), la grilla
+// se voltea para que las celdas conserven ancho útil.
+function useIsPortrait(): boolean {
+  const [portrait, setPortrait] = useState(
+    () => window.matchMedia('(orientation: portrait)').matches
+  )
+  useEffect(() => {
+    const mq = window.matchMedia('(orientation: portrait)')
+    const onChange = (e: MediaQueryListEvent): void => setPortrait(e.matches)
+    mq.addEventListener('change', onChange)
+    return () => mq.removeEventListener('change', onChange)
+  }, [])
+  return portrait
+}
 
 interface GridProps {
   cells: CellState[]
@@ -14,11 +30,40 @@ interface GridProps {
 }
 
 /**
- * Layout dinámico según cuántas celdas hay:
- *  1 → 1×1   2 → 2 columnas   3 → 3 columnas
- *  4 → 2×2   5 → 3 arriba + 2 abajo   6 → 3×2
+ * Layout dinámico según cuántas celdas hay.
+ * Horizontal: 1 → 1×1   2 → 2 columnas   3 → 3 columnas
+ *             4 → 2×2   5 → 3 arriba + 2 abajo   6 → 3×2
+ * Vertical (ventana más alta que ancha) — el espejo, en filas:
+ *             2 → 2 filas   3 → 3 filas
+ *             4 → 2×2   5 → 3 a la izquierda + 2 a la derecha   6 → 2×3
  */
-function gridStyle(n: number): CSSProperties {
+function gridStyle(n: number, portrait: boolean): CSSProperties {
+  if (portrait) {
+    switch (n) {
+      case 1:
+        return { gridTemplateColumns: '1fr', gridTemplateRows: '1fr' }
+      case 2:
+        return { gridTemplateColumns: '1fr', gridTemplateRows: 'repeat(2, 1fr)' }
+      case 3:
+        return { gridTemplateColumns: '1fr', gridTemplateRows: 'repeat(3, 1fr)' }
+      case 4:
+        return { gridTemplateColumns: 'repeat(2, 1fr)', gridTemplateRows: 'repeat(2, 1fr)' }
+      case 5:
+        // Grilla base de 6 filas en 2 columnas, llenando por columnas:
+        // 3 celdas de span 2 a la izquierda, 2 de span 3 a la derecha.
+        return {
+          gridTemplateColumns: 'repeat(2, 1fr)',
+          gridTemplateRows: 'repeat(6, 1fr)',
+          gridAutoFlow: 'column'
+        }
+      default:
+        return {
+          gridTemplateColumns: 'repeat(2, 1fr)',
+          gridTemplateRows: 'repeat(3, 1fr)',
+          gridAutoFlow: 'column'
+        }
+    }
+  }
   switch (n) {
     case 1:
       return { gridTemplateColumns: '1fr', gridTemplateRows: '1fr' }
@@ -36,8 +81,9 @@ function gridStyle(n: number): CSSProperties {
   }
 }
 
-function itemStyle(n: number, index: number): CSSProperties | undefined {
+function itemStyle(n: number, index: number, portrait: boolean): CSSProperties | undefined {
   if (n !== 5) return undefined
+  if (portrait) return { gridRow: index < 3 ? 'span 2' : 'span 3' }
   return { gridColumn: index < 3 ? 'span 2' : 'span 3' }
 }
 
@@ -51,15 +97,16 @@ export function Grid({
   onSwap
 }: GridProps): JSX.Element {
   const n = cells.length
+  const portrait = useIsPortrait()
   const [dropTargetId, setDropTargetId] = useState<string | null>(null)
 
   return (
-    <div className="grid" style={gridStyle(n)}>
+    <div className="grid" style={gridStyle(n, portrait)}>
       {cells.map((cell, i) => (
         <div
           key={cell.id}
           className={`grid-item ${dropTargetId === cell.id ? 'grid-item-drop' : ''}`}
-          style={itemStyle(n, i)}
+          style={itemStyle(n, i, portrait)}
           onDragOver={(e) => {
             if (!e.dataTransfer.types.includes(CELL_MIME)) return
             e.preventDefault()

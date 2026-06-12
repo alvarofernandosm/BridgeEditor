@@ -44,16 +44,18 @@ Los releases se generan automáticamente con GitHub Actions al empujar un tag
 
 Arranca con 1 celda. Con **+ Nueva celda** la grilla se divide sola:
 
-| Celdas | Layout |
-| ------ | ------------------- |
-| 1 | pantalla completa |
-| 2 | 2 columnas |
-| 3 | 3 columnas |
-| 4 | 2×2 |
-| 5 | 3 arriba + 2 abajo |
-| 6 | 3×2 |
+| Celdas | Horizontal | Vertical (monitor en portrait) |
+| ------ | ------------------- | ------------------------------ |
+| 1 | pantalla completa | pantalla completa |
+| 2 | 2 columnas | 2 filas |
+| 3 | 3 columnas | 3 filas |
+| 4 | 2×2 | 2×2 |
+| 5 | 3 arriba + 2 abajo | 3 a la izquierda + 2 a la derecha |
+| 6 | 3×2 | 2×3 |
 
-Al cerrar una celda la grilla se reacomoda. `Ctrl/Cmd+1…6` salta entre celdas.
+La grilla se voltea sola cuando la **ventana** queda más alta que ancha
+(monitor vertical, o media pantalla en uno horizontal), para que las celdas
+conserven ancho útil. Al cerrar una celda la grilla se reacomoda. `Ctrl/Cmd+1…6` salta entre celdas.
 **Arrastra el header de una celda y suéltalo sobre otra para intercambiar sus
 posiciones** — las terminales siguen corriendo durante el movimiento.
 El layout se guarda solo: al reabrir la app, las celdas de archivo se reabren y
@@ -92,6 +94,11 @@ El launcher de cada celda tiene un selector de permisos (también el chat):
   config); en OpenCode vía `OPENCODE_PERMISSION`.
 - **sin preguntar** — `--dangerously-skip-permissions`. Bajo tu
   responsabilidad 😄.
+
+El nivel también gobierna la **comunicación entre celdas**: con *flexible* la
+celda delega sin diálogo dentro del mismo proyecto, y con *sin preguntar* no
+hay ningún diálogo de delegación ni de apertura de celdas (ver
+[Delegación entre celdas](#delegación-entre-celdas-multi-agente)).
 
 ## Insertar rutas externas
 
@@ -182,6 +189,11 @@ se persiste en el perfil de la app.
   nueva y el resumen se adjunta automáticamente a tu próximo mensaje —
   contexto liviano sin perder el hilo (el `/compact` del TUI no existe en
   headless; este lo reemplaza).
+- **Sin TTY**: los comandos interactivos (preguntas y/N, selectores) no se
+  pueden responder en el chat — toman su default y suelen abortar. A los
+  chats de Claude se les inyectan reglas para evitarlo (banderas `--yes`,
+  pre-chequeos, nada de tareas en segundo plano); con OpenCode/Antigravity
+  pídeselo en el mensaje. Para flujos interactivos usa una celda terminal.
 - Soltar archivos sobre el chat inserta sus rutas en el mensaje (drag & drop).
 
 ## Delegación entre celdas (multi-agente)
@@ -196,12 +208,18 @@ orquestando a OpenCode con otros modelos en las celdas 2 y 3.
   Claude a usarlos: `GET /cells` lista las celdas, `POST /delegate` envía una
   tarea y bloquea hasta la respuesta.
 - **La primera delegación pide tu permiso** con un diálogo (permitir siempre /
-  una vez / denegar), por par origen→destino.
+  una vez / denegar), por par origen→destino. El **nivel de permisos de la
+  celda origen** relaja esto: con *flexible* no se pregunta cuando ambas
+  celdas están en el mismo proyecto, y con *sin preguntar* no se pregunta
+  nunca (tampoco para `/open-cell`). Las delegaciones auto-aprobadas quedan
+  marcadas en el feed de actividad (`auto (flexible)` / `auto (sin
+  preguntar)`).
 - **Advertencia entre proyectos**: si la celda destino trabaja en un
   directorio no relacionado con el del origen (ni igual, ni contenido), el
-  diálogo aparece *siempre* — aun con "permitir siempre" o aprobación por
-  clic — mostrando ambas rutas con ⚠️. Delegar a otro proyecto casi nunca es
-  lo que quieres por accidente.
+  diálogo aparece *siempre* — aun con "permitir siempre", aprobación por clic
+  o permisos *flexible* — mostrando ambas rutas con ⚠️. Delegar a otro
+  proyecto casi nunca es lo que quieres por accidente. La única excepción es
+  *sin preguntar*, que tampoco pregunta aquí.
 - El turno delegado **se ve en vivo en el chat de la celda destino** con la
   etiqueta 📨 de quién lo envió; la respuesta vuelve al orquestador como JSON.
 - Solo las celdas en **modo chat** aceptan delegación (el TUI no tiene salida
@@ -214,7 +232,8 @@ y Y a la 3, luego intégrame los resultados"*.
 Además del `/delegate` básico, el puente ofrece:
 
 - **`POST /open-cell`** — el orquestador abre una celda nueva con el agente,
-  modelo y effort que necesite (con tu permiso) y le asigna su primera tarea:
+  modelo y effort que necesite (con tu permiso, salvo que su celda corra en
+  *sin preguntar*) y le asigna su primera tarea:
   arma su propio equipo sobre la marcha. La skill le indica que si no le
   especificaste agente/modelo/effort te **pregunte primero** en vez de abrir
   un clon de sí mismo — la gracia es la diversidad de modelos.
