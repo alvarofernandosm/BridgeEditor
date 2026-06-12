@@ -2,9 +2,12 @@ name: Release
 
 # Compila los instaladores de las 3 plataformas y los publica como
 # GitHub Release cada vez que se empuja un tag v* (ej: git tag v0.1.0).
+# workflow_dispatch permite relanzar el build sin re-taguear: publica al
+# release que coincida con la versión del package.json de main.
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -18,9 +21,13 @@ jobs:
     steps:
       - name: Crear el Release del tag (si no existe)
         run: |
-          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
-            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-              --title "${GITHUB_REF_NAME#v}" --notes ""
+          # en workflow_dispatch no hay tag: electron-builder publicará al
+          # release existente que coincida con la versión del package.json
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+              gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+                --title "${GITHUB_REF_NAME#v}" --notes ""
+          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -29,9 +36,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # windows-2025 fijo: windows-latest redirige a una imagen con solo
-        # Visual Studio 2026, que el node-gyp de node-pty aún no detecta.
-        os: [ubuntu-latest, windows-2025, macos-latest]
+        # Las imágenes de Windows ya solo traen Visual Studio 2026: el
+        # node-gyp 9 de @electron/rebuild no lo detecta, así que package.json
+        # lo sube a 13 vía overrides y windows-latest vuelve a funcionar.
+        os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
