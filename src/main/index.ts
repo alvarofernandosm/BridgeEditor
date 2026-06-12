@@ -4,7 +4,7 @@ import { join } from 'path'
 import os from 'os'
 import { registerPtyHandlers, killAllPtys } from './pty'
 import { registerFileHandlers, unwatchAllFiles } from './files'
-import { registerChatHandlers, killAllChats } from './chat'
+import { registerChatHandlers, killAllChats, runningChatCount } from './chat'
 import { registerBridge } from './bridge'
 import { registerCheckpointHandlers } from './checkpoints'
 
@@ -119,6 +119,32 @@ function createWindow(): void {
   })
 
   mainWindow = win
+
+  // Cerrar (p. ej. para actualizar la app) con turnos de agente en curso los
+  // corta a mitad de stream y pierde las delegaciones pendientes: confirmar.
+  let closeConfirmed = false
+  win.on('close', (e) => {
+    if (closeConfirmed || runningChatCount() === 0) return
+    e.preventDefault()
+    dialog
+      .showMessageBox(win, {
+        type: 'warning',
+        title: 'Turnos en curso',
+        message: `Hay ${runningChatCount()} turno(s) de agente en curso`,
+        detail:
+          'Si cierras ahora se cortarán a mitad de trabajo y las delegaciones pendientes se perderán. Espera a que terminen para actualizar con tranquilidad.',
+        buttons: ['Seguir trabajando', 'Cerrar igual'],
+        defaultId: 0,
+        cancelId: 0
+      })
+      .then(({ response }) => {
+        if (response === 1) {
+          closeConfirmed = true
+          win.close()
+        }
+      })
+  })
+
   win.on('closed', () => {
     if (mainWindow === win) mainWindow = null
   })

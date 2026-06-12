@@ -1,4 +1,4 @@
-import { app, ipcMain, type WebContents } from 'electron'
+import { app, ipcMain, powerSaveBlocker, type WebContents } from 'electron'
 import { spawn, type ChildProcess } from 'child_process'
 import { readFileSync, writeFileSync } from 'fs'
 import { readdir, readFile, stat, open } from 'fs/promises'
@@ -15,6 +15,21 @@ import { claimSession, isSessionClaimed } from './pty'
 //   opencode: opencode run [--continue] <msg>
 
 const running = new Map<string, ChildProcess>()
+
+// Mientras haya turnos corriendo, impedir que el SO suspenda la app: en
+// macOS, App Nap estrangula el proceso cuando la pantalla se duerme y corta
+// los turnos largos (y el puente HTTP) a mitad de stream.
+let powerBlockerId: number | null = null
+function syncPowerBlocker(): void {
+  if (running.size > 0 && powerBlockerId === null) {
+    powerBlockerId = powerSaveBlocker.start('prevent-app-suspension')
+  } else if (running.size === 0 && powerBlockerId !== null) {
+    powerSaveBlocker.stop(powerBlockerId)
+    powerBlockerId = null
+  }
+}
+
+export const runningChatCount = (): number => running.size
 
 const shellQuote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`
 
@@ -95,6 +110,10 @@ interface OpencodeTurnState {
   tokensIn: number
   tokensOut: number
   sentTools: Set<string>
+  /** un turno sano emite ≥1 step_finish; si falta, el stream se cortó */
+  sawStepFinish: boolean
+  /** salida sin --format json (opencode viejo): no aplica la detección */
+  degraded: boolean
 }
 
 function handleOpencodeEvent(ev: any, state: OpencodeTurnState, send: SendFn): void {
@@ -114,6 +133,7 @@ function handleOpencodeEvent(ev: any, state: OpencodeTurnState, send: SendFn): v
       input.command ?? input.filePath ?? input.path ?? input.pattern ?? input.url ?? ''
     send({ kind: 'tool', name: String(part.tool ?? 'tool'), detail: String(detail).slice(0, 140) })
   } else if (ev.type === 'step_finish') {
+    state.sawStepFinish = true
     if (typeof part.cost === 'number') state.cost += part.cost
     const tokens = part.tokens
     if (tokens) {
@@ -369,6 +389,7 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
         ? spawn(cmd, { cwd: opts.cwd, shell: true, env, stdio })
         : spawn(process.env.SHELL || '/bin/bash', ['-ilc', cmd], { cwd: opts.cwd, env, stdio })
     running.set(opts.id, child)
+    syncPowerBlocker()
 
     let buf = ''
     let stderrTail = ''
@@ -379,7 +400,9 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
       cost: 0,
       tokensIn: 0,
       tokensOut: 0,
-      sentTools: new Set()
+      sentTools: new Set(),
+      sawStepFinish: false,
+      degraded: false
     }
 
     let agyOut = ''
@@ -400,6 +423,7 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
             handleOpencodeEvent(JSON.parse(line), ocState, send)
           } catch {
             // versión vieja de opencode sin --format json: degradar a texto plano
+            ocState.degraded = true
             const clean = stripAnsi(line)
             if (clean.trim()) send({ kind: 'chunk', text: clean + '\n' })
           }
@@ -427,6 +451,7 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
 
     child.on('close', async (code) => {
       running.delete(opts.id)
+      syncPowerBlocker()
       if (opts.agent === 'antigravity') {
         const full = stripAnsi(agyOut).trim()
         // conversación: la conocida, o la recién creada por este turno
@@ -462,11 +487,17 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
         if (ocState.tokensIn > 0 || ocState.tokensOut > 0) {
           metaParts.push(`↑${fmtTokens(ocState.tokensIn)} ↓${fmtTokens(ocState.tokensOut)} tok`)
         }
+        let ocError: string | null = code ? stderrTail || `código ${code}` : null
+        if (!ocError && !ocState.degraded && !ocState.sawStepFinish) {
+          ocError =
+            'turno truncado: opencode terminó sin evento de cierre (probable caída ' +
+            'del stream del proveedor) — la respuesta puede estar incompleta'
+        }
         send({
           kind: 'done',
           sessionId: ocState.session ?? 'continue',
           meta: metaParts.join(' · '),
-          error: code ? stderrTail || `código ${code}` : null
+          error: ocError
         })
       } else if (!gotResult) {
         send({
@@ -480,6 +511,7 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
 
     child.on('error', (err) => {
       running.delete(opts.id)
+      syncPowerBlocker()
       send({ kind: 'error', message: String(err) })
       resolveTurn({ text: '', error: String(err), sessionId: null })
     })
@@ -533,8 +565,11 @@ export async function executeDelegatedTurn(
   for (let attempt = 0; attempt <= MAX_AUTO_CONTINUES; attempt++) {
     result = await executeChatTurn({ ...opts, message, sessionId }, cleanEmit)
     if (result.text.trim()) texts.push(result.text)
-    if (result.error) break
-    if (result.text.includes(TASK_END_SENTINEL)) break // tarea completa
+    // un turno truncado (stream del proveedor caído a mitad de respuesta) se
+    // reanuda igual que uno sin sentinel: la sesión quedó viva y continuable
+    const truncated = result.error?.startsWith('turno truncado') ?? false
+    if (result.error && !truncated) break
+    if (!truncated && result.text.includes(TASK_END_SENTINEL)) break // tarea completa
     sessionId = result.sessionId ?? sessionId
     if (attempt === MAX_AUTO_CONTINUES) break
     // dos turnos seguidos sin texto nuevo = sin progreso visible; aún así se
@@ -649,6 +684,7 @@ export function registerChatHandlers(): void {
     const child = running.get(id)
     if (child) {
       running.delete(id)
+      syncPowerBlocker()
       try {
         child.kill('SIGTERM')
       } catch {
@@ -667,4 +703,5 @@ export function killAllChats(): void {
     }
   }
   running.clear()
+  syncPowerBlocker()
 }

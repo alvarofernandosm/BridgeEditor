@@ -10,11 +10,28 @@ permissions:
   contents: write
 
 jobs:
+  # El Release se crea UNA vez antes de la matriz: si cada job lo crea por su
+  # cuenta y dos terminan a la vez, GitHub acepta dos releases con el mismo
+  # tag y los instaladores quedan repartidos entre ambos.
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Crear el Release del tag (si no existe)
+        run: |
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+              --title "${GITHUB_REF_NAME#v}" --notes ""
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   build:
+    needs: create-release
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # windows-2025 fijo: windows-latest redirige a una imagen con solo
+        # Visual Studio 2026, que el node-gyp de node-pty aún no detecta.
+        os: [ubuntu-latest, windows-2025, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

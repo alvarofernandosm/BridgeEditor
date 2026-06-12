@@ -34,6 +34,13 @@ let getWin: () => BrowserWindow | null = () => null
 const delegating = new Set<string>()
 /** clave `${origen}→${destino}` → permitir siempre en esta sesión */
 const grantedPairs = new Set<string>()
+/** último resultado de delegación por celda destino: si el curl del
+ * orquestador murió esperando (timeout, red), lo recupera vía GET /result
+ * en vez de repetir la tarea. */
+const lastResults = new Map<
+  string,
+  { ts: number; from: string; ok: boolean; type: string; text: string; error: string | null }
+>()
 
 const PERM_MAP = { default: 'edits', flexible: 'flexible', yolo: 'full' } as const
 const MAX_CELLS = 6
@@ -192,6 +199,14 @@ async function delegateToCell(params: {
         },
         emit
       )
+      lastResults.set(target.id, {
+        ts: Date.now(),
+        from: fromLabel,
+        ok: !result.error,
+        type: 'chat',
+        text: result.text,
+        error: result.error
+      })
       return {
         status: result.error ? 502 : 200,
         payload: { ok: !result.error, cell: target.index, type: 'chat', text: result.text, error: result.error }
@@ -212,6 +227,14 @@ async function delegateToCell(params: {
       },
       () => {}
     )
+    lastResults.set(target.id, {
+      ts: Date.now(),
+      from: fromLabel,
+      ok: !result.error,
+      type: 'consult',
+      text: result.text,
+      error: result.error
+    })
     return {
       status: result.error ? 502 : 200,
       payload: { ok: !result.error, cell: target.index, type: 'consult', text: result.text, error: result.error }
@@ -339,6 +362,30 @@ export function registerBridge(getWindow: () => BrowserWindow | null): void {
       )
     }
 
+    if (req.method === 'GET' && req.url?.startsWith('/result')) {
+      const ref = new URL(req.url, 'http://localhost').searchParams.get('cell') ?? ''
+      const cell = findCell(ref)
+      if (!cell) return json(res, 404, { error: `no existe la celda "${ref}"` })
+      if (delegating.has(cell.id) || cell.busy) {
+        return json(res, 409, { error: `la celda ${cell.index} aún está trabajando; reintenta` })
+      }
+      const r = lastResults.get(cell.id)
+      if (!r) {
+        return json(res, 404, {
+          error: `la celda ${cell.index} no tiene resultados de delegación en esta sesión`
+        })
+      }
+      return json(res, 200, {
+        cell: cell.index,
+        ts: new Date(r.ts).toISOString(),
+        from: r.from,
+        ok: r.ok,
+        type: r.type,
+        text: r.text,
+        error: r.error
+      })
+    }
+
     if (req.method === 'POST' && req.url === '/delegate') {
       let body: { target?: unknown; message?: unknown; from?: unknown; fresh?: unknown }
       try {
@@ -417,7 +464,8 @@ export function registerBridge(getWindow: () => BrowserWindow | null): void {
     }
 
     return json(res, 404, {
-      error: 'ruta desconocida: GET /cells, GET /activity, POST /delegate, POST /open-cell'
+      error:
+        'ruta desconocida: GET /cells, GET /activity, GET /result?cell=N, POST /delegate, POST /open-cell'
     })
   })
 
@@ -476,9 +524,21 @@ el contexto de SU conversación, sin modificarla).
 \`\`\`bash
 curl -s -X POST "$BRIDGE_API/delegate" \\
   -H "Authorization: Bearer $BRIDGE_TOKEN" -H "Content-Type: application/json" \\
-  --max-time 900 \\
+  --max-time 3600 \\
   -d "{\\"target\\": 2, \\"message\\": \\"<tarea autocontenida>\\", \\"from\\": \\"$BRIDGE_CELL_ID\\"}"
 \`\`\`
+
+Las tareas grandes toman DECENAS de minutos: nunca uses un --max-time menor a
+3600. Si tu curl muere esperando (timeout o red), el turno SIGUE corriendo en
+la celda destino y su resultado NO se pierde: espera, consulta GET /activity
+y recupera la respuesta terminada con:
+
+\`\`\`bash
+curl -s "$BRIDGE_API/result?cell=2" -H "Authorization: Bearer $BRIDGE_TOKEN"
+\`\`\`
+
+(409 = aún trabajando; 200 = última respuesta completa, con \`.ts\` para saber
+de cuándo es). NO repitas la delegación a ciegas: duplicarías el trabajo.
 
 \`target\` acepta el número de celda que usa el usuario (\`2\`, \`"celda 2"\` y
 \`"cell 2"\` también valen) o un id interno exacto (\`"cell-7"\`). Si el usuario
@@ -534,7 +594,7 @@ elijas tú.
 \`\`\`bash
 curl -s -X POST "$BRIDGE_API/open-cell" \\
   -H "Authorization: Bearer $BRIDGE_TOKEN" -H "Content-Type: application/json" \\
-  --max-time 900 \\
+  --max-time 3600 \\
   -d "{\\"agent\\": \\"opencode\\", \\"model\\": \\"opencode-go/kimi-k2.6\\", \\"effort\\": \\"high\\", \\"cwd\\": \\"/ruta/proyecto\\", \\"message\\": \\"<primera tarea (opcional)>\\", \\"from\\": \\"$BRIDGE_CELL_ID\\"}"
 \`\`\`
 

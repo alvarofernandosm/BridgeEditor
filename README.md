@@ -250,6 +250,18 @@ Además del `/delegate` básico, el puente ofrece:
 - **`"fresh": true`** en el body de `/delegate` — la celda destino arranca
   sesión nueva (contexto limpio) en vez de continuar su conversación. Útil
   para tareas independientes que no necesitan la memoria de esa celda.
+- **`GET /result?cell=N`** — la última respuesta de delegación de esa celda.
+  Si el `curl` del orquestador muere esperando (timeout, red), el turno sigue
+  corriendo y el resultado se recupera aquí en vez de repetir la tarea
+  (`409` mientras la celda siga trabajando).
+
+Robustez de turnos largos: mientras haya turnos de agente corriendo, la app
+bloquea la suspensión del sistema (en macOS, App Nap estrangulaba el proceso
+al dormirse la pantalla y cortaba los streams a mitad de turno); si el stream
+de OpenCode muere sin evento de cierre (caída del proveedor), el turno se
+marca como **truncado** en vez de pasar por respuesta completa; y al cerrar
+la app con turnos en curso aparece una confirmación — así puedes actualizar
+BridgeEditor sin cortar agentes a mitad de trabajo.
 
 ## Puntos de control del workspace (deshacer cambios de agentes)
 
