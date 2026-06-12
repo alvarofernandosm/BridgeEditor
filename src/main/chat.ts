@@ -486,6 +486,80 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
   })
 }
 
+// ── Turnos delegados: contrato de completitud ───────────────────────────────
+// Algunos modelos vía `opencode run` (p. ej. MiMo, MiniMax) emiten un mensaje
+// de narración sin tool calls antes de terminar la tarea; el loop agéntico
+// headless lo interpreta como fin del turno y el trabajo queda a medias. El
+// contrato: la delegación exige cerrar con TASK_END_SENTINEL; si el turno
+// termina sin él, se reanuda la misma sesión automáticamente (con tope).
+// El sentinel es protocolo entre modelos: se oculta del chat y del `.text`.
+
+export const TASK_END_SENTINEL = '<task_end>'
+
+const TASK_END_CONTRACT =
+  `\n\n[Contrato del puente: cuando hayas completado TODO el trabajo pedido, ` +
+  `tu última línea debe ser exactamente ${TASK_END_SENTINEL}. Si tu turno ` +
+  `termina sin ese cierre, serás reanudado automáticamente para continuar.]`
+
+const MAX_AUTO_CONTINUES = 2
+
+const CONTINUE_MESSAGE =
+  `Tu turno anterior terminó sin completar la tarea (no cerró con ` +
+  `${TASK_END_SENTINEL}). Continúa EXACTAMENTE donde quedaste — tu primer ` +
+  `acto debe ser una herramienta o una escritura de archivo, no narración — ` +
+  `y al completar TODO cierra tu última línea con ${TASK_END_SENTINEL}.`
+
+const stripSentinel = (s: string): string => s.split(TASK_END_SENTINEL).join('').trim()
+
+export async function executeDelegatedTurn(
+  opts: ChatSendOpts,
+  emit: SendFn
+): Promise<ChatTurnResult> {
+  // El sentinel nunca llega a la UI: se filtra de los eventos de texto.
+  const cleanEmit: SendFn = (payload) => {
+    const ev = payload as { kind?: string; text?: string }
+    if ((ev.kind === 'text' || ev.kind === 'chunk') && ev.text?.includes(TASK_END_SENTINEL)) {
+      emit({ ...ev, text: ev.text.split(TASK_END_SENTINEL).join('') })
+      return
+    }
+    emit(payload)
+  }
+
+  let message = opts.message + TASK_END_CONTRACT
+  let sessionId = opts.sessionId
+  let result: ChatTurnResult = { text: '', error: null, sessionId }
+  const texts: string[] = []
+
+  for (let attempt = 0; attempt <= MAX_AUTO_CONTINUES; attempt++) {
+    result = await executeChatTurn({ ...opts, message, sessionId }, cleanEmit)
+    if (result.text.trim()) texts.push(result.text)
+    if (result.error) break
+    if (result.text.includes(TASK_END_SENTINEL)) break // tarea completa
+    sessionId = result.sessionId ?? sessionId
+    if (attempt === MAX_AUTO_CONTINUES) break
+    // dos turnos seguidos sin texto nuevo = sin progreso visible; aún así se
+    // permite el tope completo: el progreso real puede estar en los tools.
+    recordActivity({
+      cellId: opts.id,
+      kind: 'chat-turn',
+      detail: `⟳ continuación automática ${attempt + 1}/${MAX_AUTO_CONTINUES} (turno sin ${TASK_END_SENTINEL})`
+    })
+    emit({
+      kind: 'remote-user',
+      text: `⟳ Continuación automática ${attempt + 1}/${MAX_AUTO_CONTINUES}: el turno anterior terminó sin marcar la tarea como completa.`,
+      from: 'BridgeEditor'
+    })
+    emit({ kind: 'turn-start' })
+    message = CONTINUE_MESSAGE
+  }
+
+  return {
+    ...result,
+    sessionId: result.sessionId ?? sessionId,
+    text: stripSentinel(texts.join('\n\n'))
+  }
+}
+
 export function registerChatHandlers(): void {
   ipcMain.handle('chat:send', async (event, opts: ChatSendOpts) => {
     const wc: WebContents = event.sender

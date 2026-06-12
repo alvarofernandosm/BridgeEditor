@@ -4,7 +4,7 @@ import { randomUUID } from 'crypto'
 import { mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
-import { executeChatTurn } from './chat'
+import { executeChatTurn, executeDelegatedTurn } from './chat'
 import { autoCheckpoint } from './checkpoints'
 import { setBridgeEnv, recordActivity, getActivity } from './bridge-state'
 
@@ -177,7 +177,9 @@ async function delegateToCell(params: {
       const permissionMode = PERM_MAP[target.perm] ?? 'edits'
       // snapshot del workspace antes de un turno delegado (siempre puede editar)
       await autoCheckpoint(target.cwd, `antes de delegación a celda ${target.index}`)
-      const result = await executeChatTurn(
+      // Turno con contrato de completitud: si el agente cierra el turno sin
+      // terminar la tarea, el puente lo reanuda solo (executeDelegatedTurn).
+      const result = await executeDelegatedTurn(
         {
           id: target.id,
           agent: target.agent as 'claude' | 'opencode' | 'antigravity',
@@ -485,6 +487,11 @@ dice "delega a la celda 6", el target es \`6\` — no necesitas confirmar.
 La respuesta trae \`.text\`. Errores: \`403\` usuario denegó, \`409\` ocupada o no
 acepta delegación, \`404\` celda inexistente. Puedes delegar a varias celdas en
 paralelo (curl en background) y recoger resultados.
+
+El puente le exige al agente delegado cerrar con un marcador de completitud
+(\`<task_end>\`, oculto para el usuario) y reanuda automáticamente los turnos
+que terminan sin él (hasta 2 continuaciones): \`.text\` corresponde al trabajo
+terminado y las continuaciones quedan registradas en el feed de actividad.
 
 Si la celda destino trabaja en un directorio NO relacionado con el tuyo
 (otro proyecto), el usuario verá un diálogo de advertencia. Prefiere celdas
