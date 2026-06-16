@@ -1,6 +1,6 @@
 {
   "name": "bridge-editor",
-  "version": "0.5.6",
+  "version": "0.5.7",
   "description": "IDE agéntico: grilla dinámica de terminales para Claude Code, OpenCode y Antigravity",
   "main": "./out/main/index.js",
   "author": "Alvaro <alvaro@moadw.com>",
@@ -21,9 +21,6 @@
   },
   "dependencies": {
     "node-pty": "^1.0.0"
-  },
-  "overrides": {
-    "node-gyp": "^13.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.17.6",
