@@ -181,7 +181,11 @@ async function delegateToCell(params: {
       emit({ kind: 'remote-user', text: params.message, from: fromLabel })
       if (params.fresh) emit({ kind: 'done', sessionId: null, meta: 'sesión nueva (delegación fresh)' })
       emit({ kind: 'turn-start' })
-      const permissionMode = PERM_MAP[target.perm] ?? 'edits'
+      // Herencia de bypass: si la celda ORIGEN está "sin preguntar" (yolo), el
+      // turno delegado corre en bypass aunque el destino tenga otro nivel —
+      // incluida la celda recién creada por open-cell (que delega con este from).
+      // Sin bypass del origen, manda el nivel del destino (que pedirá permiso).
+      const permissionMode = originPerm === 'yolo' ? 'full' : (PERM_MAP[target.perm] ?? 'edits')
       // snapshot del workspace antes de un turno delegado (siempre puede editar)
       await autoCheckpoint(target.cwd, `antes de delegación a celda ${target.index}`)
       // Turno con contrato de completitud: si el agente cierra el turno sin

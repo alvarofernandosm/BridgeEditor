@@ -581,6 +581,60 @@ body {
   font-size: 11px;
 }
 
+.chat-permission {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: rgba(210, 153, 34, 0.09);
+  border: 1px solid rgba(210, 153, 34, 0.45);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 12.5px;
+}
+
+.chat-permission-head {
+  font-weight: 600;
+  color: #d29922;
+  font-size: 11.5px;
+}
+
+.chat-permission code {
+  white-space: pre-wrap;
+  font-size: 12px;
+}
+
+.chat-permission-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chat-permission-actions button {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.chat-permission-go {
+  border-color: #d29922 !important;
+  color: #d29922 !important;
+}
+
+.chat-permission-reject {
+  border-color: rgba(248, 81, 73, 0.5) !important;
+  color: #f85149 !important;
+}
+
+.chat-permission-state {
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .chat-thinking {
   align-self: flex-start;
   max-width: 95%;

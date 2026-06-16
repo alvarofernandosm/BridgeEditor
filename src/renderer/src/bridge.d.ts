@@ -17,6 +17,7 @@ declare global {
     | { kind: 'thinking'; text: string }
     | { kind: 'chunk'; text: string }
     | { kind: 'tool'; name: string; detail: string }
+    | { kind: 'permission-request'; requestId: string; dirs: string[] }
     | { kind: 'done'; sessionId: string | null; meta?: string | null; error?: string | null }
     | { kind: 'error'; message: string }
 
@@ -41,6 +42,7 @@ declare global {
       }): Promise<void>
       chatModels(agent: 'claude' | 'opencode' | 'antigravity'): Promise<string[]>
       chatCancel(id: string): void
+      chatPermission(requestId: string, decision: 'once' | 'all' | 'reject'): void
       chatSessions(cwd: string): Promise<Array<{ id: string; mtimeMs: number; summary: string }>>
       onChatEvent(id: string, cb: (ev: ChatEvent) => void): () => void
       syncCells(cells: unknown[]): void

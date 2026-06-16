@@ -43,6 +43,10 @@ const api = {
 
   chatCancel: (id: string): void => ipcRenderer.send('chat:cancel', { id }),
 
+  /** Responde al diálogo de permiso de acceso externo (opencode). */
+  chatPermission: (requestId: string, decision: 'once' | 'all' | 'reject'): void =>
+    ipcRenderer.send('chat:permission-response', { requestId, decision }),
+
   chatSessions: (cwd: string): Promise<Array<{ id: string; mtimeMs: number; summary: string }>> =>
     ipcRenderer.invoke('chat:sessions', cwd),
 

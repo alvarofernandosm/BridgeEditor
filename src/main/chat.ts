@@ -2,7 +2,7 @@ import { app, ipcMain, powerSaveBlocker, type WebContents } from 'electron'
 import { spawn, type ChildProcess } from 'child_process'
 import { readFileSync, writeFileSync } from 'fs'
 import { readdir, readFile, stat, open } from 'fs/promises'
-import { join } from 'path'
+import { join, resolve, dirname, sep, isAbsolute } from 'path'
 import { homedir } from 'os'
 import { claudeFlexibleSettingsPath } from './permissions'
 import { bridgeEnv, recordActivity } from './bridge-state'
@@ -54,6 +54,54 @@ export interface ChatTurnResult {
    * en headless). Señal de que el turno pudo truncarse por un fallo real, no
    * por un simple olvido del cierre <task_end>. */
   toolErrors?: string[]
+  /** Rechazos de permiso de este turno (recurso pedido), para ofrecer al usuario
+   * autorizarlos y reanudar (ver executeTurnWithPermissions). */
+  permissionDenials?: { tool: string; resource: string }[]
+  /** El usuario rechazó explícitamente un permiso pedido: la tarea se da por
+   * finalizada (no se reanuda ni se auto-continúa). */
+  rejectedPermission?: boolean
+}
+
+// ── Permisos diferidos de opencode ───────────────────────────────────────────
+// opencode pregunta antes de tocar archivos fuera del cwd, pero `opencode run`
+// corre sin TTY: ese 'ask' se auto-rechaza y la tool falla. En vez de improvisar,
+// detectamos el rechazo, le pedimos autorización al usuario (round-trip IPC) y,
+// si concede, reanudamos la sesión con el acceso ampliado. Lo concedido se
+// recuerda por celda durante la sesión del proceso.
+type PermDecision = 'once' | 'all' | 'reject'
+
+// Lo concedido por celda: bypass total ('Aceptar todo' = la celda corre como
+// --dangerously-skip-permissions el resto de la sesión) o un conjunto de
+// directorios externos autorizados ('Aceptar este directorio').
+interface CellGrant {
+  bypass: boolean
+  dirs: Set<string>
+}
+const cellGrants = new Map<string, CellGrant>()
+const pendingPermissions = new Map<string, (d: PermDecision) => void>()
+let permSeq = 0
+
+/** Marca la celda en bypass (heredado de una celda origen en bypass). */
+export function grantCellBypass(cellId: string): void {
+  const g = cellGrants.get(cellId) ?? { bypass: false, dirs: new Set<string>() }
+  g.bypass = true
+  cellGrants.set(cellId, g)
+}
+
+/** Modo efectivo: un 'Aceptar todo' previo (o herencia de bypass) eleva la celda
+ * a 'full' aunque su modo configurado sea otro. */
+function effectivePerm(cellId: string, mode: ChatSendOpts['permissionMode']): ChatSendOpts['permissionMode'] {
+  return cellGrants.get(cellId)?.bypass ? 'full' : mode
+}
+
+/** Directorio externo a autorizar para un recurso, o null si está dentro del
+ * cwd (en ese caso el rechazo no es por cruzar de directorio y no se ofrece). */
+function externalDirOf(resource: string, cwd: string): string | null {
+  if (!resource) return null
+  const abs = isAbsolute(resource) ? resource : resolve(cwd, resource)
+  const root = cwd.endsWith(sep) ? cwd.slice(0, -1) : cwd
+  if (abs === root || abs.startsWith(root + sep)) return null
+  return dirname(abs)
 }
 
 // Reglas del entorno headless por turnos: sin esto los agentes lanzan
@@ -101,28 +149,32 @@ function buildCommand(opts: ChatSendOpts): string {
     : ''
   const model = opts.model ? `--model ${shellQuote(opts.model)} ` : ''
   const variant = opts.effort ? `--variant ${shellQuote(opts.effort)} ` : ''
-  // 'full' = bypass total, a la par de claude --dangerously-skip-permissions.
-  // El resto de modos ajusta permisos vía OPENCODE_PERMISSION (ver opencodeEnv).
-  const skip = opts.permissionMode === 'full' ? '--dangerously-skip-permissions ' : ''
+  // 'full' (configurado o por bypass concedido) = a la par de claude
+  // --dangerously-skip-permissions. El resto de modos ajusta permisos vía
+  // OPENCODE_PERMISSION (ver opencodeEnv) y pregunta al topar acceso externo.
+  const skip = effectivePerm(opts.id, opts.permissionMode) === 'full' ? '--dangerously-skip-permissions ' : ''
   // --thinking: sin él opencode omite los eventos "reasoning" del stream
   return `opencode run --format json --thinking ${skip}${session}${model}${variant}${shellQuote(opts.message)}`
 }
 
-// Permisos de opencode en el chat headless. Por defecto opencode PREGUNTA antes
-// de tocar archivos FUERA del cwd (action external_directory = ask), pero el
-// chat corre sin TTY: ese 'ask' no se puede responder, así que la herramienta
-// se omite en silencio y la tarea queda truncada (p. ej. al leer un diseño de
-// un repo hermano para reimplementarlo aquí, o traer una imagen de Descargas).
-// Como leer/usar material externo no es riesgoso, lo permitimos. Nota: opencode
-// NO separa lectura de escritura externa — external_directory es un gate por
-// ubicación, así que ambas comparten regla. El modo 'full' no pasa por aquí:
-// usa --dangerously-skip-permissions (paridad con claude en bypass).
-function opencodeEnv(mode: ChatSendOpts['permissionMode']): Record<string, string> {
+// Permisos de opencode en el chat headless. opencode pregunta antes de tocar
+// archivos FUERA del cwd (external_directory = ask); sin TTY ese 'ask' se
+// auto-rechaza. NO lo abrimos en seco: dejamos que tope el permiso para poder
+// pedírselo al usuario (executeTurnWithPermissions). Aquí sólo sembramos lo ya
+// concedido para esta celda: 'full'/bypass no pasa por aquí (usa el flag), un
+// 'Aceptar este directorio' siembra external_directory={dir}/*:allow.
+function opencodeEnv(cellId: string, mode: ChatSendOpts['permissionMode']): Record<string, string> {
   if (mode === 'full') return {}
-  const permission: Record<string, unknown> = { external_directory: { '*': 'allow' } }
+  const permission: Record<string, unknown> = {}
+  const dirs = cellGrants.get(cellId)?.dirs
+  if (dirs && dirs.size > 0) {
+    const ext: Record<string, string> = {}
+    for (const dir of dirs) ext[`${dir}/*`] = 'allow'
+    permission.external_directory = ext
+  }
   // plan = explorar sin modificar (paridad con claude --permission-mode plan)
   if (mode === 'plan') permission.edit = 'deny'
-  return { OPENCODE_PERMISSION: JSON.stringify(permission) }
+  return Object.keys(permission).length ? { OPENCODE_PERMISSION: JSON.stringify(permission) } : {}
 }
 
 const fmtTokens = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))
@@ -139,6 +191,7 @@ interface OpencodeTurnState {
   /** salida sin --format json (opencode viejo): no aplica la detección */
   degraded: boolean
   toolErrors: string[]
+  permissionDenials: { tool: string; resource: string }[]
 }
 
 function handleOpencodeEvent(ev: any, state: OpencodeTurnState, send: SendFn): void {
@@ -167,6 +220,12 @@ function handleOpencodeEvent(ev: any, state: OpencodeTurnState, send: SendFn): v
       // executeDelegatedTurn sepa que el turno se truncó por un fallo real.
       const err = String(part.state?.error ?? 'falló').replace(/\s+/g, ' ').slice(0, 200)
       state.toolErrors.push(`${name}${detail ? ` (${detail})` : ''}: ${err}`)
+      // Rechazo de permiso: lo separamos para poder ofrecer autorizarlo. El
+      // recurso es el path tocado (filePath/path); el comando bash no aplica.
+      if (/permission|rejected|not allowed|denied/i.test(err)) {
+        const resource = String(input.filePath ?? input.path ?? '')
+        if (resource) state.permissionDenials.push({ tool: name, resource })
+      }
       send({ kind: 'tool', name, detail: `⚠ ${detail ? detail + ' — ' : ''}${err}` })
     } else {
       send({ kind: 'tool', name, detail })
@@ -414,7 +473,9 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
     const env = {
       ...process.env,
       ...bridgeEnv(),
-      ...(opts.agent === 'opencode' ? opencodeEnv(opts.permissionMode) : {}),
+      ...(opts.agent === 'opencode'
+        ? opencodeEnv(opts.id, effectivePerm(opts.id, opts.permissionMode))
+        : {}),
       BRIDGE_CELL_ID: opts.id,
       TERM: 'dumb'
     } as Record<string, string>
@@ -443,7 +504,8 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
       sentTools: new Set(),
       sawStepFinish: false,
       degraded: false,
-      toolErrors: []
+      toolErrors: [],
+      permissionDenials: []
     }
 
     let agyOut = ''
@@ -551,7 +613,8 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
         text: collected.join('\n\n').trim(),
         error: finalError,
         sessionId: finalSession,
-        toolErrors: ocState.toolErrors
+        toolErrors: ocState.toolErrors,
+        permissionDenials: ocState.permissionDenials
       })
     })
 
@@ -562,6 +625,84 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
       resolveTurn({ text: '', error: String(err), sessionId: null })
     })
   })
+}
+
+// ── Permiso diferido: pedir autorización y reanudar ──────────────────────────
+const MAX_PERMISSION_RETRIES = 3
+
+/** Pide autorización para unos directorios externos: emite el evento a la celda
+ * y espera la decisión del usuario por IPC (chat:permission-response). */
+function requestPermission(cellId: string, dirs: string[], emit: SendFn): Promise<PermDecision> {
+  const requestId = `${cellId}:${permSeq++}`
+  return new Promise<PermDecision>((resolveDecision) => {
+    pendingPermissions.set(requestId, resolveDecision)
+    emit({ kind: 'permission-request', requestId, dirs })
+  })
+}
+
+/** Resuelve una solicitud pendiente (la llama el IPC del renderer al hacer clic). */
+export function resolvePermission(requestId: string, decision: PermDecision): void {
+  const r = pendingPermissions.get(requestId)
+  if (r) {
+    pendingPermissions.delete(requestId)
+    r(decision)
+  }
+}
+
+const grantedMessage = (decision: PermDecision, dirs: string[]): string =>
+  decision === 'all'
+    ? `El usuario autorizó acceso total (bypass) para esta celda. Reintenta la acción ` +
+      `que fue bloqueada y continúa la tarea.`
+    : `El usuario autorizó el acceso a: ${dirs.join(', ')}. Reintenta la lectura o acción ` +
+      `que fue bloqueada y continúa la tarea.`
+
+/**
+ * Ejecuta un turno y, si opencode topa un permiso de acceso a un directorio
+ * externo, le pide autorización al usuario y reanuda la MISMA sesión con el
+ * acceso concedido (o da la tarea por finalizada si lo rechaza). Lo usan tanto
+ * el chat directo como la delegación. Para claude/antigravity es un passthrough.
+ */
+export async function executeTurnWithPermissions(opts: ChatSendOpts, emit: SendFn): Promise<ChatTurnResult> {
+  let message = opts.message
+  let sessionId = opts.sessionId
+  let result: ChatTurnResult = { text: '', error: null, sessionId }
+
+  for (let attempt = 0; attempt <= MAX_PERMISSION_RETRIES; attempt++) {
+    result = await executeChatTurn({ ...opts, message, sessionId }, emit)
+    sessionId = result.sessionId ?? sessionId
+    result = { ...result, sessionId }
+    if (result.error || opts.agent !== 'opencode') break
+    if (cellGrants.get(opts.id)?.bypass) break // ya en bypass: no debió topar permiso
+
+    // Directorios externos que el turno no pudo tocar. Los rechazos dentro del
+    // cwd (p. ej. edit denegado en modo plan) NO se ofrecen: respetan el modo.
+    const dirs = [
+      ...new Set(
+        (result.permissionDenials ?? [])
+          .map((d) => externalDirOf(d.resource, opts.cwd))
+          .filter((d): d is string => d !== null)
+      )
+    ]
+    if (dirs.length === 0) break
+    // tope alcanzado: no pedimos más (ni emitimos turn-start) para no dejar la
+    // celda "trabajando" sin reanudar; el último turno ya corrió arriba.
+    if (attempt >= MAX_PERMISSION_RETRIES) break
+
+    const decision = await requestPermission(opts.id, dirs, emit)
+    if (decision === 'reject') {
+      result = { ...result, rejectedPermission: true }
+      break
+    }
+    if (decision === 'all') grantCellBypass(opts.id)
+    else {
+      const g = cellGrants.get(opts.id) ?? { bypass: false, dirs: new Set<string>() }
+      for (const d of dirs) g.dirs.add(d)
+      cellGrants.set(opts.id, g)
+    }
+    emit({ kind: 'turn-start' })
+    message = grantedMessage(decision, dirs)
+  }
+  return result
 }
 
 // ── Turnos delegados: contrato de completitud ───────────────────────────────
@@ -618,12 +759,13 @@ export async function executeDelegatedTurn(
   const texts: string[] = []
 
   for (let attempt = 0; attempt <= MAX_AUTO_CONTINUES; attempt++) {
-    result = await executeChatTurn({ ...opts, message, sessionId }, cleanEmit)
+    result = await executeTurnWithPermissions({ ...opts, message, sessionId }, cleanEmit)
     if (result.text.trim()) texts.push(result.text)
     // un turno truncado (stream del proveedor caído a mitad de respuesta) se
     // reanuda igual que uno sin sentinel: la sesión quedó viva y continuable
     const truncated = result.error?.startsWith('turno truncado') ?? false
     if (result.error && !truncated) break
+    if (result.rejectedPermission) break // el usuario rechazó: tarea finalizada
     if (!truncated && result.text.includes(TASK_END_SENTINEL)) break // tarea completa
     sessionId = result.sessionId ?? sessionId
     if (attempt === MAX_AUTO_CONTINUES) break
@@ -668,10 +810,18 @@ export function registerChatHandlers(): void {
     if (opts.permissionMode !== 'plan') {
       await autoCheckpoint(opts.cwd, `antes de turno de ${opts.agent}`)
     }
-    return executeChatTurn(opts, (payload) => {
+    return executeTurnWithPermissions(opts, (payload) => {
       if (!wc.isDestroyed()) wc.send(`chat:event:${opts.id}`, payload)
     }).then(() => undefined)
   })
+
+  // Respuesta del usuario al diálogo de permiso de acceso externo (opencode).
+  ipcMain.on(
+    'chat:permission-response',
+    (_event, { requestId, decision }: { requestId: string; decision: PermDecision }) => {
+      resolvePermission(requestId, decision)
+    }
+  )
 
   ipcMain.handle('chat:models', (_event, agent: 'claude' | 'opencode') => listChatModels(agent))
 
@@ -742,6 +892,10 @@ export function registerChatHandlers(): void {
   })
 
   ipcMain.on('chat:cancel', (_event, { id }: { id: string }) => {
+    // un permiso pendiente de esta celda queda sin diálogo: cuenta como rechazo
+    for (const requestId of pendingPermissions.keys()) {
+      if (requestId.startsWith(`${id}:`)) resolvePermission(requestId, 'reject')
+    }
     const child = running.get(id)
     if (child) {
       running.delete(id)

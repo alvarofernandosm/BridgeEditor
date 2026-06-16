@@ -4,13 +4,18 @@ import { CELL_MIME, pathsFromDrop, quotePaths } from './dnd'
 import type { AgentKind } from './App'
 
 interface ChatMsg {
-  role: 'user' | 'remote-user' | 'assistant' | 'thinking' | 'tool' | 'meta' | 'error' | 'proposal'
+  role: 'user' | 'remote-user' | 'assistant' | 'thinking' | 'tool' | 'meta' | 'error' | 'proposal' | 'permission'
   text: string
   name?: string
   /** Para 'proposal': celda destino del @delegate. */
   target?: string
   /** Para 'proposal': pending | sent | dismissed */
   state?: 'pending' | 'sent' | 'dismissed'
+  /** Para 'permission': id de la solicitud y directorios externos pedidos. */
+  requestId?: string
+  dirs?: string[]
+  /** Para 'permission': decisión tomada (undefined = aún pendiente). */
+  decision?: 'once' | 'all' | 'reject'
 }
 
 /** @delegate(2, "tarea") emitido por el agente en su respuesta. */
@@ -148,6 +153,12 @@ export function ChatView({
           break
         case 'tool':
           setMessages((ms) => [...ms, { role: 'tool', name: ev.name, text: ev.detail }])
+          break
+        case 'permission-request':
+          setRunning(false)
+          onActivity('idle')
+          setMessages((ms) => [...ms, { role: 'permission', text: '', requestId: ev.requestId, dirs: ev.dirs }])
+          if (!activeRef.current) onAttention()
           break
         case 'done':
           setRunning(false)
@@ -295,6 +306,19 @@ export function ChatView({
     )
   }
 
+  // Responder al diálogo de permiso de acceso externo: avisa al main y marca la
+  // tarjeta con la decisión. 'reject' finaliza la tarea; 'once'/'all' reanudan.
+  const resolvePerm = (index: number, requestId: string, decision: 'once' | 'all' | 'reject'): void => {
+    window.bridge.chatPermission(requestId, decision)
+    setMessages((ms) =>
+      ms.map((m, i) => (i === index && m.role === 'permission' && !m.decision ? { ...m, decision } : m))
+    )
+  }
+
+  // Hay un permiso esperando decisión: bloquea el compositor para no arrancar
+  // otro turno mientras el main espera la respuesta.
+  const awaitingPerm = messages.some((m) => m.role === 'permission' && !m.decision)
+
   // display: lo que se muestra como burbuja del usuario (null = nada, p. ej.
   // el prompt interno de /compact); message: lo que viaja al agente.
   const sendText = (message: string, display: string | null = message): void => {
@@ -409,6 +433,43 @@ export function ChatView({
                 ) : (
                   <span className="chat-proposal-state">
                     {m.state === 'sent' ? '✓ delegada' : 'ignorada'}
+                  </span>
+                )}
+              </div>
+            )
+          }
+          if (m.role === 'permission') {
+            return (
+              <div key={i} className="chat-permission">
+                <span className="chat-permission-head">
+                  🔐 El agente pide acceso fuera del directorio de trabajo
+                </span>
+                {m.dirs && m.dirs.length > 0 && <code>{m.dirs.join('\n')}</code>}
+                {!m.decision ? (
+                  <div className="chat-permission-actions">
+                    <button
+                      className="chat-permission-go"
+                      onClick={() => resolvePerm(i, m.requestId!, 'once')}
+                    >
+                      ✓ Aceptar este directorio
+                    </button>
+                    <button onClick={() => resolvePerm(i, m.requestId!, 'all')}>
+                      ✓✓ Aceptar todo (bypass de la celda)
+                    </button>
+                    <button
+                      className="chat-permission-reject"
+                      onClick={() => resolvePerm(i, m.requestId!, 'reject')}
+                    >
+                      ✕ Rechazar
+                    </button>
+                  </div>
+                ) : (
+                  <span className="chat-permission-state">
+                    {m.decision === 'reject'
+                      ? '⛔ rechazado — tarea finalizada'
+                      : m.decision === 'all'
+                        ? '🔓 celda en bypass para el resto de la sesión'
+                        : '✓ acceso autorizado — reanudando'}
                   </span>
                 )}
               </div>
@@ -532,8 +593,14 @@ export function ChatView({
           ref={inputRef}
           value={input}
           rows={2}
-          placeholder={running ? 'El agente está trabajando…' : 'Escribe un mensaje (Enter envía)'}
-          disabled={running}
+          placeholder={
+            awaitingPerm
+              ? 'Esperando tu autorización…'
+              : running
+                ? 'El agente está trabajando…'
+                : 'Escribe un mensaje (Enter envía)'
+          }
+          disabled={running || awaitingPerm}
           spellCheck={false}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {
@@ -543,7 +610,11 @@ export function ChatView({
             }
           }}
         />
-        <button className="chat-send" onClick={send} disabled={running || !input.trim()}>
+        <button
+          className="chat-send"
+          onClick={send}
+          disabled={running || awaitingPerm || !input.trim()}
+        >
           ➤
         </button>
       </div>
