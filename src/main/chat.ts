@@ -50,6 +50,10 @@ export interface ChatTurnResult {
   text: string
   error: string | null
   sessionId: string | null
+  /** Herramientas que terminaron en error este turno (p. ej. permiso rechazado
+   * en headless). Señal de que el turno pudo truncarse por un fallo real, no
+   * por un simple olvido del cierre <task_end>. */
+  toolErrors?: string[]
 }
 
 // Reglas del entorno headless por turnos: sin esto los agentes lanzan
@@ -97,8 +101,28 @@ function buildCommand(opts: ChatSendOpts): string {
     : ''
   const model = opts.model ? `--model ${shellQuote(opts.model)} ` : ''
   const variant = opts.effort ? `--variant ${shellQuote(opts.effort)} ` : ''
+  // 'full' = bypass total, a la par de claude --dangerously-skip-permissions.
+  // El resto de modos ajusta permisos vía OPENCODE_PERMISSION (ver opencodeEnv).
+  const skip = opts.permissionMode === 'full' ? '--dangerously-skip-permissions ' : ''
   // --thinking: sin él opencode omite los eventos "reasoning" del stream
-  return `opencode run --format json --thinking ${session}${model}${variant}${shellQuote(opts.message)}`
+  return `opencode run --format json --thinking ${skip}${session}${model}${variant}${shellQuote(opts.message)}`
+}
+
+// Permisos de opencode en el chat headless. Por defecto opencode PREGUNTA antes
+// de tocar archivos FUERA del cwd (action external_directory = ask), pero el
+// chat corre sin TTY: ese 'ask' no se puede responder, así que la herramienta
+// se omite en silencio y la tarea queda truncada (p. ej. al leer un diseño de
+// un repo hermano para reimplementarlo aquí, o traer una imagen de Descargas).
+// Como leer/usar material externo no es riesgoso, lo permitimos. Nota: opencode
+// NO separa lectura de escritura externa — external_directory es un gate por
+// ubicación, así que ambas comparten regla. El modo 'full' no pasa por aquí:
+// usa --dangerously-skip-permissions (paridad con claude en bypass).
+function opencodeEnv(mode: ChatSendOpts['permissionMode']): Record<string, string> {
+  if (mode === 'full') return {}
+  const permission: Record<string, unknown> = { external_directory: { '*': 'allow' } }
+  // plan = explorar sin modificar (paridad con claude --permission-mode plan)
+  if (mode === 'plan') permission.edit = 'deny'
+  return { OPENCODE_PERMISSION: JSON.stringify(permission) }
 }
 
 const fmtTokens = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))
@@ -114,6 +138,7 @@ interface OpencodeTurnState {
   sawStepFinish: boolean
   /** salida sin --format json (opencode viejo): no aplica la detección */
   degraded: boolean
+  toolErrors: string[]
 }
 
 function handleOpencodeEvent(ev: any, state: OpencodeTurnState, send: SendFn): void {
@@ -124,14 +149,28 @@ function handleOpencodeEvent(ev: any, state: OpencodeTurnState, send: SendFn): v
   } else if (ev.type === 'reasoning' && typeof part.text === 'string' && part.text.trim()) {
     send({ kind: 'thinking', text: part.text })
   } else if (ev.type === 'tool') {
-    if (part.state?.status && part.state.status !== 'completed') return
-    const id = String(part.id ?? Math.random())
+    const status = part.state?.status
+    // pending/running: la tool aún no terminó; esperamos a 'completed' o 'error'
+    if (status !== 'completed' && status !== 'error') return
+    const id = String(part.id ?? part.callID ?? Math.random())
     if (state.sentTools.has(id)) return
     state.sentTools.add(id)
     const input = part.state?.input ?? {}
-    const detail =
+    const detail = String(
       input.command ?? input.filePath ?? input.path ?? input.pattern ?? input.url ?? ''
-    send({ kind: 'tool', name: String(part.tool ?? 'tool'), detail: String(detail).slice(0, 140) })
+    ).slice(0, 140)
+    const name = String(part.tool ?? 'tool')
+    if (status === 'error') {
+      // Antes esto se descartaba en silencio: una tool bloqueada (p. ej. permiso
+      // auto-rechazado en headless) desaparecía del chat y el contrato <task_end>
+      // reanudaba el turno como si nada. La registramos para mostrarla y para que
+      // executeDelegatedTurn sepa que el turno se truncó por un fallo real.
+      const err = String(part.state?.error ?? 'falló').replace(/\s+/g, ' ').slice(0, 200)
+      state.toolErrors.push(`${name}${detail ? ` (${detail})` : ''}: ${err}`)
+      send({ kind: 'tool', name, detail: `⚠ ${detail ? detail + ' — ' : ''}${err}` })
+    } else {
+      send({ kind: 'tool', name, detail })
+    }
   } else if (ev.type === 'step_finish') {
     state.sawStepFinish = true
     if (typeof part.cost === 'number') state.cost += part.cost
@@ -375,6 +414,7 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
     const env = {
       ...process.env,
       ...bridgeEnv(),
+      ...(opts.agent === 'opencode' ? opencodeEnv(opts.permissionMode) : {}),
       BRIDGE_CELL_ID: opts.id,
       TERM: 'dumb'
     } as Record<string, string>
@@ -402,7 +442,8 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
       tokensOut: 0,
       sentTools: new Set(),
       sawStepFinish: false,
-      degraded: false
+      degraded: false,
+      toolErrors: []
     }
 
     let agyOut = ''
@@ -506,7 +547,12 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
         })
         if (!finalError) finalError = `claude terminó sin resultado (código ${code})`
       }
-      resolveTurn({ text: collected.join('\n\n').trim(), error: finalError, sessionId: finalSession })
+      resolveTurn({
+        text: collected.join('\n\n').trim(),
+        error: finalError,
+        sessionId: finalSession,
+        toolErrors: ocState.toolErrors
+      })
     })
 
     child.on('error', (err) => {
@@ -541,6 +587,15 @@ const CONTINUE_MESSAGE =
   `acto debe ser una herramienta o una escritura de archivo, no narración — ` +
   `y al completar TODO cierra tu última línea con ${TASK_END_SENTINEL}.`
 
+// Cuando el turno se truncó porque una herramienta fue bloqueada/falló, la
+// reanudación no debe fingir que sólo faltó el cierre: se le dice al modelo la
+// causa real y que no la repita a ciegas (ni improvise como si tuviera el dato).
+const blockedContinueMessage = (cause: string): string =>
+  `Tu turno anterior se truncó: una herramienta fue bloqueada o falló — ${cause}. ` +
+  `NO repitas esa misma acción a ciegas. Si necesitas un acceso o permiso que no ` +
+  `tienes, dilo explícitamente en tu respuesta en vez de improvisar; si hay otra ` +
+  `vía para completar la tarea, tómala. Al terminar TODO cierra con ${TASK_END_SENTINEL}.`
+
 const stripSentinel = (s: string): string => s.split(TASK_END_SENTINEL).join('').trim()
 
 export async function executeDelegatedTurn(
@@ -572,20 +627,26 @@ export async function executeDelegatedTurn(
     if (!truncated && result.text.includes(TASK_END_SENTINEL)) break // tarea completa
     sessionId = result.sessionId ?? sessionId
     if (attempt === MAX_AUTO_CONTINUES) break
-    // dos turnos seguidos sin texto nuevo = sin progreso visible; aún así se
-    // permite el tope completo: el progreso real puede estar en los tools.
+    // ¿el turno se truncó por una herramienta bloqueada/fallida, o sólo le faltó
+    // el cierre <task_end>? En el primer caso NO lo enmascaramos: reportamos la
+    // causa real al usuario y al modelo (antes ambos casos se veían idénticos).
+    const cause = result.toolErrors?.length ? result.toolErrors.join(' · ').slice(0, 300) : null
     recordActivity({
       cellId: opts.id,
       kind: 'chat-turn',
-      detail: `⟳ continuación automática ${attempt + 1}/${MAX_AUTO_CONTINUES} (turno sin ${TASK_END_SENTINEL})`
+      detail: cause
+        ? `⚠ continuación ${attempt + 1}/${MAX_AUTO_CONTINUES} tras bloqueo: ${cause}`
+        : `⟳ continuación automática ${attempt + 1}/${MAX_AUTO_CONTINUES} (turno sin ${TASK_END_SENTINEL})`
     })
     emit({
       kind: 'remote-user',
-      text: `⟳ Continuación automática ${attempt + 1}/${MAX_AUTO_CONTINUES}: el turno anterior terminó sin marcar la tarea como completa.`,
+      text: cause
+        ? `⚠ Continuación ${attempt + 1}/${MAX_AUTO_CONTINUES}: el turno anterior se truncó por un bloqueo — ${cause}`
+        : `⟳ Continuación automática ${attempt + 1}/${MAX_AUTO_CONTINUES}: el turno anterior terminó sin marcar la tarea como completa.`,
       from: 'BridgeEditor'
     })
     emit({ kind: 'turn-start' })
-    message = CONTINUE_MESSAGE
+    message = cause ? blockedContinueMessage(cause) : CONTINUE_MESSAGE
   }
 
   return {
