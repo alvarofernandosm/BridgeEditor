@@ -493,6 +493,37 @@ export function registerBridge(getWindow: () => BrowserWindow | null): void {
 // cada CLI: ~/.claude/skills (Claude Code, y OpenCode es compatible) y como
 // plugin de Antigravity (~/.gemini/config/plugins/<n>/skills/<n>/SKILL.md).
 function writeDelegationSkill(): void {
+  // El agente corre estos comandos en SU shell: bash en Linux/macOS y
+  // PowerShell en Windows, donde `curl` es un alias de Invoke-WebRequest y
+  // `$BRIDGE_API` no expande (hace falta `$env:`). Sin ejemplos de la shell
+  // correcta, el orquestador falla en la primera llamada al puente.
+  const win = process.platform === 'win32'
+  const lang = win ? 'powershell' : 'bash'
+  const authNote = win
+    ? 'Auth siempre: `-Headers @{Authorization="Bearer $env:BRIDGE_TOKEN"}`.'
+    : 'Auth siempre: `-H "Authorization: Bearer $BRIDGE_TOKEN"`.'
+  const timeoutFlag = win ? '-TimeoutSec' : '--max-time'
+
+  const get = (path: string): string =>
+    win
+      ? `Invoke-RestMethod "$env:BRIDGE_API${path}" -Headers @{Authorization="Bearer $env:BRIDGE_TOKEN"}`
+      : `curl -s "$BRIDGE_API${path}" -H "Authorization: Bearer $BRIDGE_TOKEN"`
+
+  const post = (path: string, fields: string, bashBody: string): string =>
+    win
+      ? `$body = @{ ${fields} } | ConvertTo-Json\n` +
+        `try {\n` +
+        `  Invoke-RestMethod "$env:BRIDGE_API${path}" -Method Post -ContentType "application/json" -Headers @{Authorization="Bearer $env:BRIDGE_TOKEN"} -Body $body -TimeoutSec 3600\n` +
+        `} catch {\n` +
+        `  # 403/409/404 llegan como excepción: el cuerpo con el motivo se lee del stream\n` +
+        `  $r = $_.Exception.Response\n` +
+        `  if ($r) { (New-Object IO.StreamReader($r.GetResponseStream())).ReadToEnd() } else { $_.Exception.Message }\n` +
+        `}`
+      : `curl -s -X POST "$BRIDGE_API${path}" \\\n` +
+        `  -H "Authorization: Bearer $BRIDGE_TOKEN" -H "Content-Type: application/json" \\\n` +
+        `  --max-time 3600 \\\n` +
+        `  -d "${bashBody}"`
+
   const skill = `---
 name: bridge-cells
 description: Orquestar los agentes de otras celdas de BridgeEditor — listar celdas, delegarles tareas, consultar terminales de Claude, ver el feed de actividad y abrir celdas nuevas con otro agente/modelo. Usar cuando el usuario pida delegar, coordinar u orquestar trabajo entre tabs/celdas del editor.
@@ -500,14 +531,17 @@ description: Orquestar los agentes de otras celdas de BridgeEditor — listar ce
 
 # Orquestación entre celdas de BridgeEditor
 
-Estás en una celda de BridgeEditor. Con \`$BRIDGE_API\` y \`$BRIDGE_TOKEN\` en tu
+Estás en una celda de BridgeEditor. Con \`BRIDGE_API\` y \`BRIDGE_TOKEN\` en tu
 entorno puedes orquestar a los agentes de las otras celdas (la tuya es
-\`$BRIDGE_CELL_ID\`). Auth siempre: \`-H "Authorization: Bearer $BRIDGE_TOKEN"\`.
+\`BRIDGE_CELL_ID\`). ${authNote}
+
+Los ejemplos van en la shell de tu celda (${win ? 'PowerShell' : 'bash'}); no los
+traduzcas a otra.
 
 ## Listar celdas
 
-\`\`\`bash
-curl -s "$BRIDGE_API/cells" -H "Authorization: Bearer $BRIDGE_TOKEN"
+\`\`\`${lang}
+${get('/cells')}
 \`\`\`
 
 Cada celda trae DOS identificadores — no los confundas:
@@ -523,26 +557,34 @@ Cada celda trae DOS identificadores — no los confundas:
 visible en su celda) o \`consult\` (terminal de Claude: pregunta respondida con
 el contexto de SU conversación, sin modificarla).
 
-## Delegar o consultar (bloquea hasta la respuesta; usa --max-time generoso)
+## Delegar o consultar (bloquea hasta la respuesta; usa ${timeoutFlag} generoso)
 
-\`\`\`bash
-curl -s -X POST "$BRIDGE_API/delegate" \\
-  -H "Authorization: Bearer $BRIDGE_TOKEN" -H "Content-Type: application/json" \\
-  --max-time 3600 \\
-  -d "{\\"target\\": 2, \\"message\\": \\"<tarea autocontenida>\\", \\"from\\": \\"$BRIDGE_CELL_ID\\"}"
+\`\`\`${lang}
+${post(
+  '/delegate',
+  `target = 2; message = "<tarea autocontenida>"; from = $env:BRIDGE_CELL_ID`,
+  `{\\"target\\": 2, \\"message\\": \\"<tarea autocontenida>\\", \\"from\\": \\"$BRIDGE_CELL_ID\\"}`
+)}
 \`\`\`
 
-Las tareas grandes toman DECENAS de minutos: nunca uses un --max-time menor a
-3600. Si tu curl muere esperando (timeout o red), el turno SIGUE corriendo en
-la celda destino y su resultado NO se pierde: espera, consulta GET /activity
+Las tareas grandes toman DECENAS de minutos: nunca uses un ${timeoutFlag} menor a
+3600. Si tu petición muere esperando (timeout o red), el turno SIGUE corriendo
+en la celda destino y su resultado NO se pierde: espera, consulta GET /activity
 y recupera la respuesta terminada con:
 
-\`\`\`bash
-curl -s "$BRIDGE_API/result?cell=2" -H "Authorization: Bearer $BRIDGE_TOKEN"
+\`\`\`${lang}
+${get('/result?cell=2')}
 \`\`\`
 
 (409 = aún trabajando; 200 = última respuesta completa, con \`.ts\` para saber
-de cuándo es). NO repitas la delegación a ciegas: duplicarías el trabajo.
+de cuándo es). NO repitas la delegación a ciegas: duplicarías el trabajo.${
+  win
+    ? '\n\nEse GET también lanza excepción si no es 200: envuélvelo en el mismo\n' +
+      'try/catch de arriba para leer el motivo. Y NO cambies a `curl.exe` para\n' +
+      'los POST: PowerShell le come las comillas del JSON y el puente responde\n' +
+      '"JSON inválido".'
+    : ''
+}
 
 \`target\` acepta el número de celda que usa el usuario (\`2\`, \`"celda 2"\` y
 \`"cell 2"\` también valen) o un id interno exacto (\`"cell-7"\`). Si el usuario
@@ -550,7 +592,7 @@ dice "delega a la celda 6", el target es \`6\` — no necesitas confirmar.
 
 La respuesta trae \`.text\`. Errores: \`403\` usuario denegó, \`409\` ocupada o no
 acepta delegación, \`404\` celda inexistente. Puedes delegar a varias celdas en
-paralelo (curl en background) y recoger resultados.
+paralelo (${win ? 'Start-Job' : 'curl en background'}) y recoger resultados.
 
 El puente le exige al agente delegado cerrar con un marcador de completitud
 (\`<task_end>\`, oculto para el usuario) y reanuda automáticamente los turnos
@@ -584,7 +626,8 @@ La celda no comparte tu contexto: cada mensaje debe ser autocontenido.
 
 Por defecto la celda destino CONTINÚA su conversación (recuerda lo anterior).
 Para una tarea independiente que no necesita ese contexto, agrega
-\`"fresh": true\` al body: la celda arranca sesión nueva (contexto limpio).
+\`${win ? 'fresh = $true' : '"fresh": true'}\` al body: la celda arranca sesión
+nueva (contexto limpio).
 
 ## Abrir una celda nueva con un agente/modelo y asignarle trabajo
 
@@ -595,11 +638,12 @@ modelo: el valor del multi-agente está en combinar modelos distintos. Solo
 procede sin preguntar si el usuario ya lo dijo o te pidió explícitamente que
 elijas tú.
 
-\`\`\`bash
-curl -s -X POST "$BRIDGE_API/open-cell" \\
-  -H "Authorization: Bearer $BRIDGE_TOKEN" -H "Content-Type: application/json" \\
-  --max-time 3600 \\
-  -d "{\\"agent\\": \\"opencode\\", \\"model\\": \\"opencode-go/kimi-k2.6\\", \\"effort\\": \\"high\\", \\"cwd\\": \\"/ruta/proyecto\\", \\"message\\": \\"<primera tarea (opcional)>\\", \\"from\\": \\"$BRIDGE_CELL_ID\\"}"
+\`\`\`${lang}
+${post(
+  '/open-cell',
+  `agent = "opencode"; model = "opencode-go/kimi-k2.6"; effort = "high"; cwd = "C:\\ruta\\proyecto"; message = "<primera tarea (opcional)>"; from = $env:BRIDGE_CELL_ID`,
+  `{\\"agent\\": \\"opencode\\", \\"model\\": \\"opencode-go/kimi-k2.6\\", \\"effort\\": \\"high\\", \\"cwd\\": \\"/ruta/proyecto\\", \\"message\\": \\"<primera tarea (opcional)>\\", \\"from\\": \\"$BRIDGE_CELL_ID\\"}`
+)}
 \`\`\`
 
 \`agent\` puede ser \`claude\`, \`opencode\` o \`antigravity\` (CLI \`agy\`: Gemini,
@@ -612,8 +656,8 @@ listan con \`opencode models\` / \`agy models\`; los de claude son sus alias
 
 ## Feed de actividad (qué ha pasado en las demás celdas)
 
-\`\`\`bash
-curl -s "$BRIDGE_API/activity" -H "Authorization: Bearer $BRIDGE_TOKEN"
+\`\`\`${lang}
+${get('/activity')}
 \`\`\`
 
 Últimos eventos: archivos guardados en visores, turnos de chat y delegaciones.

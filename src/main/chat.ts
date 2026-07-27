@@ -1,6 +1,7 @@
 import { app, ipcMain, powerSaveBlocker, type WebContents } from 'electron'
-import { spawn, type ChildProcess } from 'child_process'
-import { readFileSync, writeFileSync } from 'fs'
+import { spawn, type ChildProcess, type ChildProcessByStdio } from 'child_process'
+import type { Readable } from 'stream'
+import { existsSync, readFileSync, writeFileSync } from 'fs'
 import { readdir, readFile, stat, open } from 'fs/promises'
 import { join, resolve, dirname, sep, isAbsolute } from 'path'
 import { homedir } from 'os'
@@ -118,43 +119,89 @@ const HEADLESS_NOTE =
   '--force, --non-interactive) y verifica precondiciones antes (p. ej. git ' +
   'status limpio antes de codemods).'
 
-function buildCommand(opts: ChatSendOpts): string {
+/** El comando del agente como argv SIN escapar: cada plataforma lo lanza a su
+ * manera (ver spawnAgent), y el quoting es cosa de quien lo lanza. */
+function buildArgv(opts: ChatSendOpts): { file: string; args: string[] } {
   if (opts.agent === 'antigravity') {
     // agy -p: print no-interactivo. No hay salida JSON: el texto plano se
     // procesa en el close (la salida reimprime el historial; ver agyTranscripts).
-    const flags = ['-p', shellQuote(opts.message), '--print-timeout', '15m']
-    if (opts.model) flags.push('--model', shellQuote(opts.model))
-    if (opts.sessionId) flags.push('--conversation', shellQuote(opts.sessionId))
+    const flags = ['-p', opts.message, '--print-timeout', '15m']
+    if (opts.model) flags.push('--model', opts.model)
+    if (opts.sessionId) flags.push('--conversation', opts.sessionId)
     if (opts.permissionMode === 'full') flags.push('--dangerously-skip-permissions')
-    return `agy ${flags.join(' ')}`
+    return { file: 'agy', args: flags }
   }
   if (opts.agent === 'claude') {
-    const flags = ['-p', shellQuote(opts.message), '--output-format', 'stream-json', '--verbose']
-    flags.push('--append-system-prompt', shellQuote(HEADLESS_NOTE))
-    if (opts.model) flags.push('--model', shellQuote(opts.model))
-    if (opts.effort) flags.push('--effort', shellQuote(opts.effort))
-    if (opts.sessionId) flags.push('--resume', shellQuote(opts.sessionId))
+    const flags = ['-p', opts.message, '--output-format', 'stream-json', '--verbose']
+    flags.push('--append-system-prompt', HEADLESS_NOTE)
+    if (opts.model) flags.push('--model', opts.model)
+    if (opts.effort) flags.push('--effort', opts.effort)
+    if (opts.sessionId) flags.push('--resume', opts.sessionId)
     if (opts.permissionMode === 'full') flags.push('--dangerously-skip-permissions')
     else if (opts.permissionMode === 'plan') flags.push('--permission-mode', 'plan')
     else if (opts.permissionMode === 'flexible')
-      flags.push('--settings', shellQuote(claudeFlexibleSettingsPath()))
+      flags.push('--settings', claudeFlexibleSettingsPath())
     else flags.push('--permission-mode', 'acceptEdits')
-    return `claude ${flags.join(' ')}`
+    return { file: 'claude', args: flags }
   }
-  // 'continue' es el marcador legado (antes de rastrear el sessionID real)
-  const session = opts.sessionId
-    ? opts.sessionId === 'continue'
-      ? '--continue '
-      : `--session ${shellQuote(opts.sessionId)} `
-    : ''
-  const model = opts.model ? `--model ${shellQuote(opts.model)} ` : ''
-  const variant = opts.effort ? `--variant ${shellQuote(opts.effort)} ` : ''
+  // --thinking: sin él opencode omite los eventos "reasoning" del stream
+  const flags = ['run', '--format', 'json', '--thinking']
   // 'full' (configurado o por bypass concedido) = a la par de claude
   // --dangerously-skip-permissions. El resto de modos ajusta permisos vía
   // OPENCODE_PERMISSION (ver opencodeEnv) y pregunta al topar acceso externo.
-  const skip = effectivePerm(opts.id, opts.permissionMode) === 'full' ? '--dangerously-skip-permissions ' : ''
-  // --thinking: sin él opencode omite los eventos "reasoning" del stream
-  return `opencode run --format json --thinking ${skip}${session}${model}${variant}${shellQuote(opts.message)}`
+  if (effectivePerm(opts.id, opts.permissionMode) === 'full') {
+    flags.push('--dangerously-skip-permissions')
+  }
+  // 'continue' es el marcador legado (antes de rastrear el sessionID real)
+  if (opts.sessionId === 'continue') flags.push('--continue')
+  else if (opts.sessionId) flags.push('--session', opts.sessionId)
+  if (opts.model) flags.push('--model', opts.model)
+  if (opts.effort) flags.push('--variant', opts.effort)
+  flags.push(opts.message)
+  return { file: 'opencode', args: flags }
+}
+
+/** Ejecutable de `file` según PATH + PATHEXT (Windows no resuelve solo las
+ * extensiones cuando se lanza sin shell). */
+function resolveWindowsBinary(file: string): string | null {
+  const exts = (process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)
+  for (const dir of (process.env.PATH ?? '').split(';').filter(Boolean)) {
+    for (const ext of exts) {
+      const candidate = join(dir, file + ext)
+      if (existsSync(candidate)) return candidate
+    }
+  }
+  return null
+}
+
+/**
+ * Lanza el CLI del agente. En POSIX vía shell de login; en Windows con argv
+ * directo, SIN shell: cmd.exe no entiende las comillas simples de POSIX (son
+ * un carácter más) y encima no admite saltos de línea en la línea de comandos,
+ * así que un mensaje multilínea la truncaba y el agente arrancaba sin prompt —
+ * turno vacío que la UI reportaba como "terminó sin resultado (código 0)".
+ */
+function spawnAgent(
+  file: string,
+  args: string[],
+  options: { cwd: string; env: Record<string, string>; stdio: ['ignore', 'pipe', 'pipe'] }
+): ChildProcessByStdio<null, Readable, Readable> {
+  if (process.platform !== 'win32') {
+    // -ilc (login + interactivo): garantiza el PATH del usuario aunque la app
+    // se lance desde el menú de aplicaciones (nvm y similares viven en .bashrc,
+    // que los shells no interactivos se saltan).
+    const cmd = [file, ...args].map(shellQuote).join(' ')
+    return spawn(process.env.SHELL || '/bin/bash', ['-ilc', cmd], options)
+  }
+  const resolved = resolveWindowsBinary(file)
+  // Los shims .cmd/.bat (instalaciones por npm) no se pueden lanzar sin shell:
+  // node los rechaza desde la corrección de CVE-2024-27980. Ahí hace falta
+  // cmd.exe, y el quoting de cada argumento lo pone node (mejor que armarlo a
+  // mano); un mensaje multilínea sigue sin poder pasar por cmd.exe.
+  if (resolved && /\.(cmd|bat)$/i.test(resolved)) {
+    return spawn('cmd.exe', ['/d', '/s', '/c', resolved, ...args], options)
+  }
+  return spawn(resolved ?? file, args, options)
 }
 
 // Permisos de opencode en el chat headless. opencode pregunta antes de tocar
@@ -466,7 +513,7 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
       emit(payload)
     }
 
-    const cmd = buildCommand(opts)
+    const { file, args } = buildArgv(opts)
     // que el rastreador de celdas TUI no reclame la conversación de este chat
     // (su archivo .db recibe mtime nuevo con cada turno)
     if (opts.agent === 'antigravity' && opts.sessionId) claimSession(opts.sessionId)
@@ -479,16 +526,10 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
       BRIDGE_CELL_ID: opts.id,
       TERM: 'dumb'
     } as Record<string, string>
-    // -ilc (login + interactivo): garantiza el PATH del usuario aunque la app
-    // se lance desde el menú de aplicaciones (nvm y similares viven en .bashrc,
-    // que los shells no interactivos se saltan).
     // stdio: stdin cerrado — opencode run lee stdin si está abierto (modo pipe)
     // y se quedaría esperando EOF para siempre.
     const stdio: ['ignore', 'pipe', 'pipe'] = ['ignore', 'pipe', 'pipe']
-    const child =
-      process.platform === 'win32'
-        ? spawn(cmd, { cwd: opts.cwd, shell: true, env, stdio })
-        : spawn(process.env.SHELL || '/bin/bash', ['-ilc', cmd], { cwd: opts.cwd, env, stdio })
+    const child = spawnAgent(file, args, { cwd: opts.cwd, env, stdio })
     running.set(opts.id, child)
     syncPowerBlocker()
 
