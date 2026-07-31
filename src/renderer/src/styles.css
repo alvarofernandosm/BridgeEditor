@@ -218,12 +218,49 @@ body {
   font-weight: 400;
 }
 
+/* Título de la tarea: se queda con el espacio libre del header y el cwd cede
+   primero — en una celda de 1/6 de pantalla informa más que la ruta. */
+.cell-task {
+  /* no crece: el .spacer del header es quien empuja los botones a la derecha */
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: text;
+}
+
+.cell-task::before {
+  content: '· ';
+  color: var(--muted);
+}
+
+/* Puesto a mano: se distingue del deducido, que puede cambiar solo. */
+.cell-task-manual {
+  font-style: italic;
+}
+
+.cell-task-input {
+  flex: 1 1 auto;
+  min-width: 60px;
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 1px 6px;
+  color: var(--text);
+  font: inherit;
+  outline: none;
+}
+
 .cell-cwd {
   color: var(--muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   direction: rtl;
+  /* cede el espacio antes que el título de la tarea */
+  flex: 0 3 auto;
   min-width: 0;
 }
 
@@ -664,6 +701,10 @@ body {
   padding: 8px 12px;
   font-size: 12.5px;
   color: #ffa198;
+  /* los errores del proveedor traen URLs largas (cuota, opt-in del modelo):
+     que corten en cualquier punto en vez de desbordar la celda */
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .chat-working {

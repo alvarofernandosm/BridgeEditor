@@ -40,6 +40,8 @@ function buildAppMenu(): void {
     {
       label: 'Celda',
       submenu: [
+        { label: '✎ Titular la celda activa…', click: () => sendMenuAction('rename-cell') },
+        { type: 'separator' },
         {
           label: 'Insertar ruta de archivo…',
           accelerator: 'Ctrl+Shift+A',

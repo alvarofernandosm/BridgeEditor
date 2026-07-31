@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { renderMarkdown } from './highlight'
 import { CELL_MIME, pathsFromDrop, quotePaths } from './dnd'
+import { titleFromPrompt } from './titles'
 import type { AgentKind } from './App'
 
 interface ChatMsg {
@@ -32,6 +33,10 @@ interface ChatViewProps {
   sessionId: string | null
   model: string | null
   effort: string | null
+  /** La celda ya tiene título: los mensajes entrantes no lo pisan. */
+  titled: boolean
+  /** Título deducido del primer mensaje de la conversación. */
+  onAutoTitle: (title: string) => void
   onModel: (model: string | null) => void
   onEffort: (effort: string | null) => void
   onSessionId: (id: string | null) => void
@@ -81,6 +86,8 @@ export function ChatView({
   sessionId,
   model,
   effort,
+  titled,
+  onAutoTitle,
   onModel,
   onEffort,
   onSessionId,
@@ -107,6 +114,8 @@ export function ChatView({
   const sessionRef = useRef(sessionId)
   const activeRef = useRef(active)
   activeRef.current = active
+  const titledRef = useRef(titled)
+  titledRef.current = titled
   // /compact: true mientras esperamos el resumen; el resumen listo se adjunta
   // como contexto al próximo mensaje del usuario en la sesión nueva.
   const compactingRef = useRef(false)
@@ -119,9 +128,16 @@ export function ChatView({
           sessionRef.current = ev.sessionId
           onSessionId(ev.sessionId)
           break
-        case 'remote-user':
+        case 'remote-user': {
           setMessages((ms) => [...ms, { role: 'remote-user', text: ev.text, name: ev.from }])
+          // Celda que recibe una delegación sin título propio: la tarea
+          // delegada es lo que mejor la describe.
+          if (!titledRef.current) {
+            const t = titleFromPrompt(ev.text)
+            if (t) onAutoTitle(t)
+          }
           break
+        }
         case 'turn-start':
           setRunning(true)
           onActivity('working')
@@ -323,6 +339,13 @@ export function ChatView({
   // el prompt interno de /compact); message: lo que viaja al agente.
   const sendText = (message: string, display: string | null = message): void => {
     if (!message || running) return
+    // Primer mensaje de la conversación (también tras /new o /compact): es el
+    // que define de qué va la celda. Se usa `display` porque `message` puede
+    // llevar adjuntos internos (el resumen compactado, prompts del puente).
+    if (display !== null && !sessionRef.current) {
+      const t = titleFromPrompt(display)
+      if (t) onAutoTitle(t)
+    }
     if (display !== null) setMessages((ms) => [...ms, { role: 'user', text: display }])
     setRunning(true)
     onActivity('working')

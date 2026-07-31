@@ -239,6 +239,44 @@ interface OpencodeTurnState {
   degraded: boolean
   toolErrors: string[]
   permissionDenials: { tool: string; resource: string }[]
+  /** fallo reportado por el evento `error` del stream (ver opencodeFail) */
+  fail: OpencodeFail | null
+}
+
+interface OpencodeFail {
+  text: string
+  /** el fallo dejó la sesión viva: reanudarla puede completar el turno */
+  retryable: boolean
+}
+
+// Fallos de red/proveedor que no traen veredicto propio. "Streaming response
+// failed" es el que corta los turnos largos en los modelos gratuitos: la
+// sesión queda viva, así que reanudarla suele bastar. Cuota, acceso al modelo
+// y auth NO entran aquí a propósito: reintentarlos sólo repite el fallo.
+const OC_TRANSIENT =
+  /streaming response failed|stream (?:error|closed|aborted|interrupted)|overloaded|econnreset|socket hang up|fetch failed|premature close|etimedout/i
+
+/**
+ * Texto legible del evento `{type:"error"}` de opencode, cuya forma es el
+ * NamedError serializado: `{name, data:{message, statusCode, isRetryable}}`.
+ * `isRetryable` es el propio veredicto de opencode y manda sobre la heurística.
+ */
+function opencodeFail(raw: unknown): OpencodeFail | null {
+  if (typeof raw === 'string') return raw.trim() ? { text: raw.trim(), retryable: false } : null
+  if (!raw || typeof raw !== 'object') return null
+  const e = raw as { name?: string; message?: string; data?: Record<string, unknown> }
+  const data = e.data ?? {}
+  const msg = String(data.message ?? e.message ?? '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  const status = typeof data.statusCode === 'number' ? ` ${data.statusCode}` : ''
+  // UnknownError es el envoltorio genérico: no aporta nada al mensaje
+  const name = e.name && e.name !== 'UnknownError' ? e.name + status : ''
+  const text = [name, msg].filter(Boolean).join(': ') || JSON.stringify(raw)
+  return {
+    text: text.slice(0, 400),
+    retryable: typeof data.isRetryable === 'boolean' ? data.isRetryable : OC_TRANSIENT.test(msg)
+  }
 }
 
 function handleOpencodeEvent(ev: any, state: OpencodeTurnState, send: SendFn): void {
@@ -277,6 +315,11 @@ function handleOpencodeEvent(ev: any, state: OpencodeTurnState, send: SendFn): v
     } else {
       send({ kind: 'tool', name, detail })
     }
+  } else if (ev.type === 'error') {
+    // El fallo real del turno (cuota agotada, modelo sin acceso, stream del
+    // proveedor caído) llega SÓLO por aquí: opencode sale con código 1 y stderr
+    // VACÍO, así que sin esto la celda mostraba un inútil "código 1".
+    state.fail = opencodeFail(ev.error) ?? state.fail
   } else if (ev.type === 'step_finish') {
     state.sawStepFinish = true
     if (typeof part.cost === 'number') state.cost += part.cost
@@ -286,6 +329,70 @@ function handleOpencodeEvent(ev: any, state: OpencodeTurnState, send: SendFn): v
         (tokens.input ?? 0) + (tokens.cache?.read ?? 0) + (tokens.cache?.write ?? 0)
       state.tokensOut += tokens.output ?? 0
     }
+  }
+}
+
+// Respaldo para cuando el turno muere sin dejar el evento `error` en stdout:
+// el log de opencode. Es un archivo global a TODAS las celdas, así que se filtra
+// por session.id para no atribuirle a una celda el fallo de otra en paralelo.
+const OPENCODE_LOG_DIR = join(
+  process.env.XDG_DATA_HOME ?? join(homedir(), '.local', 'share'),
+  'opencode',
+  'log'
+)
+
+/** Cola de un archivo: los logs de opencode crecen sin límite. */
+async function tailFile(path: string, maxBytes: number): Promise<string> {
+  const fh = await open(path, 'r')
+  try {
+    const size = (await fh.stat()).size
+    const len = Math.min(size, maxBytes)
+    const buf = Buffer.alloc(len)
+    await fh.read(buf, 0, len, size - len)
+    return buf.toString('utf8')
+  } finally {
+    await fh.close()
+  }
+}
+
+async function lastOpencodeError(
+  sinceMs: number,
+  sessionId: string | null
+): Promise<OpencodeFail | null> {
+  try {
+    const names = await readdir(OPENCODE_LOG_DIR)
+    let best: { name: string; mtime: number } | null = null
+    for (const name of names) {
+      if (!name.endsWith('.log')) continue
+      const st = await stat(join(OPENCODE_LOG_DIR, name)).catch(() => null)
+      if (!st || st.mtimeMs < sinceMs - 2000) continue
+      if (!best || st.mtimeMs > best.mtime) best = { name, mtime: st.mtimeMs }
+    }
+    if (!best) return null
+    const lines = (await tailFile(join(OPENCODE_LOG_DIR, best.name), 256 * 1024))
+      .split('\n')
+      .filter(
+        (l) => l.includes('level=ERROR') && (!sessionId || l.includes(`session.id=${sessionId}`))
+      )
+    const last = lines[lines.length - 1]
+    if (!last) return null
+    // logfmt: … error.error="AI_APICallError: …" stack=undefined
+    const at = last.search(/\berror(?:\.error)?=/)
+    if (at < 0) return null
+    const msg = last
+      .slice(at)
+      .replace(/^[^=]*=/, '')
+      .replace(/"\s+[\w.]+=.*$/, '') // corta el siguiente par clave=valor
+      .replace(/^"|"$/g, '')
+      .trim()
+    if (!msg) return null
+    const model = last.match(/modelID=(\S+)/)?.[1]
+    return {
+      text: `${msg}${model ? ` (${model})` : ''}`.slice(0, 400),
+      retryable: OC_TRANSIENT.test(msg)
+    }
+  } catch {
+    return null
   }
 }
 
@@ -546,7 +653,8 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
       sawStepFinish: false,
       degraded: false,
       toolErrors: [],
-      permissionDenials: []
+      permissionDenials: [],
+      fail: null
     }
 
     let agyOut = ''
@@ -631,8 +739,28 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
         if (ocState.tokensIn > 0 || ocState.tokensOut > 0) {
           metaParts.push(`↑${fmtTokens(ocState.tokensIn)} ↓${fmtTokens(ocState.tokensOut)} tok`)
         }
-        let ocError: string | null = code ? stderrTail || `código ${code}` : null
-        if (!ocError && !ocState.degraded && !ocState.sawStepFinish) {
+        // El fallo de opencode viene por stdout (evento `error`), no por stderr;
+        // si no llegó, se rescata de su log. El código de salida a secas es el
+        // último recurso: por sí solo no le dice nada al usuario.
+        const stderrText = stripAnsi(stderrTail).trim()
+        // un stream que opencode reintentó por dentro y cerró bien (código 0 con
+        // step_finish) no es un fallo del turno: no se reporta
+        const reportedFail = code || !ocState.sawStepFinish ? ocState.fail : null
+        const fail =
+          reportedFail ??
+          (code
+            ? stderrText
+              ? { text: stderrText.slice(-400), retryable: false }
+              : await lastOpencodeError(startTime, ocState.session)
+            : null)
+        let ocError: string | null = null
+        if (fail) {
+          // Fallo reintentable = la sesión sigue viva y continuable: se marca
+          // como truncado para que la delegación la reanude en vez de abortar.
+          ocError = fail.retryable ? `turno truncado: ${fail.text} — reintentable` : fail.text
+        } else if (code) {
+          ocError = `código ${code}`
+        } else if (!ocState.degraded && !ocState.sawStepFinish) {
           ocError =
             'turno truncado: opencode terminó sin evento de cierre (probable caída ' +
             'del stream del proveedor) — la respuesta puede estar incompleta'

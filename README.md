@@ -68,6 +68,28 @@ limpia. Los chats hacen lo propio con su session id del modo headless. Las
 terminales de OpenCode restauran sesión nueva (su TUI tiene selector de
 sesiones interno para retomar).
 
+## Títulos de celda
+
+Cada celda muestra, junto al nombre del agente, **en qué está trabajando**. El
+título se pone solo y sin costo:
+
+- **Terminales**: el título que el propio TUI publica en la terminal (Claude
+  Code anuncia ahí su tarea en curso). Los títulos que solo repiten el shell o
+  el directorio se descartan, así que la celda conserva el último con sentido.
+- **Chats**: el primer mensaje de la conversación, resumido a una línea (se
+  renueva con `/new` y `/compact`). Una celda que recibe una delegación toma la
+  tarea delegada como título.
+
+**Doble clic sobre el título** (o `✎ Titular la celda activa…` en la paleta y
+en el menú Celda) lo cambia a mano; el título manual va en *cursiva*, gana
+sobre el automático y viaja con las plantillas de layout. Deja el campo vacío
+para volver al automático. En el header el título tiene prioridad sobre la
+ruta: en celdas angostas el `cwd` cede espacio primero y queda en el tooltip.
+
+Los títulos también viajan al puente: `GET /cells` trae un campo `title`, y los
+diálogos de delegación identifican a la celda por lo que está haciendo, no solo
+por su número.
+
 ## Supervisión de agentes
 
 - El punto de estado de cada celda indica qué hace el agente: 🟢 trabajando
@@ -113,12 +135,13 @@ chocar con los atajos de Claude Code/OpenCode: las variantes simples
 
 `Ctrl+Shift+P` (o `Ctrl+K` fuera de una terminal) abre la paleta: lanzar un
 agente en una celda nueva (usa el directorio de la celda activa), abrir un
-archivo, cerrar o relanzar la celda activa, o saltar a cualquier celda.
-Filtra escribiendo, navega con ↑/↓ y ejecuta con Enter.
+archivo, titular, cerrar o relanzar la celda activa, o saltar a cualquier celda
+(la lista muestra en qué anda cada una). Filtra escribiendo, navega con ↑/↓ y
+ejecuta con Enter.
 
 Las acciones principales también viven en el **menú de aplicación** (Archivo ·
-Celda · Workspace · Ayuda): celda nueva, abrir archivo, insertar rutas, puntos
-de control, plantillas, y el Acerca de con la versión.
+Celda · Workspace · Ayuda): celda nueva, abrir archivo, titular celda, insertar
+rutas, puntos de control, plantillas, y el Acerca de con la versión.
 
 ## Drag & drop
 

@@ -18,6 +18,8 @@ interface CellInfo {
   id: string
   index: number
   label: string
+  /** En qué anda la celda: título deducido del agente o puesto por el usuario. */
+  title: string | null
   agent: 'claude' | 'opencode' | 'antigravity' | 'shell' | null
   mode: 'term' | 'chat'
   cwd: string
@@ -59,9 +61,12 @@ function findCell(target: unknown): CellInfo | undefined {
   return undefined
 }
 
+/** Nombre legible de una celda: agente y, si lo tiene, en qué anda. */
+const cellName = (c: CellInfo): string => (c.title ? `${c.label} · ${c.title}` : c.label)
+
 const fromLabelOf = (fromCellId: unknown): string => {
   const cell = typeof fromCellId === 'string' ? findCell(fromCellId) : undefined
-  return cell ? `La celda ${cell.index} (${cell.label})` : 'Un agente'
+  return cell ? `La celda ${cell.index} (${cellName(cell)})` : 'Un agente'
 }
 
 // Mismo proyecto = mismo directorio o uno contiene al otro. Si los cwd no
@@ -159,7 +164,7 @@ async function delegateToCell(params: {
     const ok = await askPermission(
       fromLabel,
       pairKey,
-      `${fromLabel} quiere ${verb} la celda ${target.index} (${target.label})${crossProject ? ' — ⚠️ otro proyecto' : ''}`,
+      `${fromLabel} quiere ${verb} la celda ${target.index} (${cellName(target)})${crossProject ? ' — ⚠️ otro proyecto' : ''}`,
       `Directorio: ${target.cwd}\n\nEl agente orquestador podrá enviarle tareas y leer sus respuestas.${warn}`
     )
     if (!ok) return { status: 403, payload: { error: 'el usuario denegó la delegación' } }
@@ -340,6 +345,7 @@ export function registerBridge(getWindow: () => BrowserWindow | null): void {
             cell: c.index,
             id: c.id,
             label: c.label,
+            title: c.title,
             agent: c.agent,
             mode: c.mode,
             cwd: c.cwd,
@@ -353,7 +359,7 @@ export function registerBridge(getWindow: () => BrowserWindow | null): void {
     }
 
     if (req.method === 'GET' && req.url === '/activity') {
-      const labels = new Map(registry.map((c) => [c.id, `celda ${c.index} (${c.label})`]))
+      const labels = new Map(registry.map((c) => [c.id, `celda ${c.index} (${cellName(c)})`]))
       return json(
         res,
         200,
@@ -552,6 +558,10 @@ Cada celda trae DOS identificadores — no los confundas:
 - \`id\` (p. ej. \`"cell-7"\`): identificador interno estable; NO es la posición
   (el contador nunca se reusa). Úsalo como \`target\` solo en tareas largas,
   porque sobrevive a reordenamientos.
+
+\`title\` (puede ser \`null\`) dice en qué anda esa celda: lo deduce el editor de
+lo que el agente publica, o lo escribió el usuario. Úsalo para elegir a quién
+delegar y para no pisar a alguien que ya está en la misma tarea.
 
 \`delegationType\` indica cómo acepta trabajo: \`chat\` (delegación completa,
 visible en su celda) o \`consult\` (terminal de Claude: pregunta respondida con

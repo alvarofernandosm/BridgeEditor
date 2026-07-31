@@ -23,6 +23,10 @@ export interface CellState {
   chatModel: string | null
   /** Nivel de razonamiento del chat (claude --effort / opencode --variant); null = auto. */
   chatEffort: string | null
+  /** Título puesto a mano por el usuario; gana sobre autoTitle. null = automático. */
+  title: string | null
+  /** Título deducido solo: título OSC del TUI (term) o primer prompt (chat). */
+  autoTitle: string | null
   /** Ruta del archivo abierto cuando la celda es un visor (status 'file'). */
   file: string | null
   cwd: string
@@ -49,6 +53,8 @@ const newCell = (): CellState => ({
   chatSessionId: null,
   chatModel: null,
   chatEffort: null,
+  title: null,
+  autoTitle: null,
   file: null,
   cwd: '',
   status: 'launcher',
@@ -68,6 +74,8 @@ interface SavedCell {
   chatSessionId?: string | null
   chatModel?: string | null
   chatEffort?: string | null
+  title?: string | null
+  autoTitle?: string | null
   file: string | null
   cwd: string
 }
@@ -88,6 +96,10 @@ function cellsFromSaved(saved: SavedCell[], withSessions: boolean): CellState[] 
       chatSessionId: withSessions && typeof s.chatSessionId === 'string' ? s.chatSessionId : null,
       chatModel: typeof s.chatModel === 'string' ? s.chatModel : null,
       chatEffort: typeof s.chatEffort === 'string' ? s.chatEffort : null,
+      title: typeof s.title === 'string' ? s.title : null,
+      // El automático solo se restaura junto con la sesión: en una plantilla
+      // (sesiones limpias) describiría un trabajo que esa celda ya no tiene.
+      autoTitle: withSessions && typeof s.autoTitle === 'string' ? s.autoTitle : null,
       file,
       cwd: typeof s.cwd === 'string' ? s.cwd : '',
       status: file ? 'file' : agent ? 'running' : 'launcher',
@@ -119,6 +131,9 @@ function loadTemplates(): Record<string, SavedCell[]> {
     return {}
   }
 }
+
+/** Título de la tarea de una celda: el manual gana, si no el deducido. */
+export const titleOf = (c: CellState): string | null => c.title ?? c.autoTitle ?? null
 
 const labelOf = (c: CellState): string =>
   c.status === 'file' && c.file
@@ -169,6 +184,7 @@ export default function App(): JSX.Element {
         id: c.id,
         index: i + 1,
         label: labelOf(c),
+        title: titleOf(c),
         agent: c.agent,
         mode: c.mode,
         cwd: c.cwd,
@@ -216,6 +232,8 @@ export default function App(): JSX.Element {
       chatSessionId: c.chatSessionId,
       chatModel: c.chatModel,
       chatEffort: c.chatEffort,
+      title: c.title,
+      autoTitle: c.autoTitle,
       file: c.file,
       cwd: c.cwd
     }))
@@ -282,6 +300,9 @@ export default function App(): JSX.Element {
         perm: c.perm,
         chatModel: c.chatModel,
         chatEffort: c.chatEffort,
+        // el título manual describe el rol de la celda y viaja con la plantilla;
+        // el automático describe un trabajo puntual y no
+        title: c.title,
         file: c.file,
         cwd: c.cwd
       }))
@@ -319,6 +340,13 @@ export default function App(): JSX.Element {
       return next
     })
   }, [])
+
+  // Renombrar desde la paleta o el menú: la celda abre su editor de título
+  // (el mismo que el doble clic en la cabecera).
+  const renameActive = useCallback(() => {
+    if (!activeId) return
+    window.dispatchEvent(new CustomEvent('bridge:rename-cell', { detail: { cellId: activeId } }))
+  }, [activeId])
 
   // Ctrl+Shift+A / Ctrl+Shift+D: elegir archivo/directorio y pegar su ruta
   // (entre comillas si hace falta) en la terminal o el chat de la celda activa.
@@ -406,6 +434,14 @@ export default function App(): JSX.Element {
       window.bridge.pickFile().then((path) => path && openFileInCell(path))
     }
   })
+  if (activeCell?.agent && activeCell.status !== 'file') {
+    paletteCommands.push({
+      id: 'rename-active',
+      label: '✎ Titular la celda activa…',
+      hint: titleOf(activeCell) ?? 'sin título — vacío deja el automático',
+      run: renameActive
+    })
+  }
   if (activeCell) {
     paletteCommands.push({
       id: 'close-active',
@@ -436,9 +472,10 @@ export default function App(): JSX.Element {
     })
   }
   cells.forEach((c, i) => {
+    const task = titleOf(c)
     paletteCommands.push({
       id: `go-${c.id}`,
-      label: `Ir a celda ${i + 1} — ${labelOf(c)}`,
+      label: `Ir a celda ${i + 1} — ${labelOf(c)}${task ? ` · ${task}` : ''}`,
       hint: `Ctrl+${i + 1}`,
       run: () => activateCell(c.id)
     })
@@ -486,6 +523,9 @@ export default function App(): JSX.Element {
         break
       case 'insert-dir':
         insertPathIntoActive('dir')
+        break
+      case 'rename-cell':
+        renameActive()
         break
       case 'close-active':
         if (activeCell) closeCell(activeCell.id)

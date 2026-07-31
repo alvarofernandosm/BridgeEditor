@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Terminal, type ILink } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
@@ -8,6 +8,7 @@ import { CELL_MIME, pathsFromDrop, quotePaths } from './dnd'
 import { Launcher } from './Launcher'
 import { FileView } from './FileView'
 import { ChatView } from './ChatView'
+import { cleanTerminalTitle } from './titles'
 
 export const AGENTS: Record<AgentKind, { label: string; command: string | null; color: string }> = {
   claude: { label: 'Claude Code', command: 'claude', color: '#d97757' },
@@ -37,6 +38,37 @@ export function TerminalCell({
 }: TerminalCellProps): JSX.Element {
   const agent = cell.agent ? AGENTS[cell.agent] : null
   const ptyId = `${cell.id}-g${cell.generation}`
+  // Título de la tarea: el manual gana sobre el deducido por la celda.
+  const task = cell.title ?? cell.autoTitle ?? null
+  const [editingTitle, setEditingTitle] = useState(false)
+  const [titleDraft, setTitleDraft] = useState('')
+
+  // Un launcher no está haciendo nada y un visor ya se llama como su archivo.
+  const canTitle = cell.agent !== null && cell.status !== 'file'
+
+  const startEditingTitle = useCallback(() => {
+    if (!canTitle) return
+    setTitleDraft(cell.title ?? cell.autoTitle ?? '')
+    setEditingTitle(true)
+  }, [canTitle, cell.title, cell.autoTitle])
+
+  const commitTitle = (): void => {
+    const value = titleDraft.trim()
+    // Vaciar el campo devuelve la celda al título automático.
+    onUpdate(cell.id, { title: value || null })
+    setEditingTitle(false)
+  }
+
+  // "✎ Titular la celda activa…" desde la paleta o el menú.
+  useEffect(() => {
+    const onRename = (e: Event): void => {
+      const detail = (e as CustomEvent).detail as { cellId: string }
+      if (detail.cellId === cell.id) startEditingTitle()
+    }
+    window.addEventListener('bridge:rename-cell', onRename)
+    return () => window.removeEventListener('bridge:rename-cell', onRename)
+  }, [cell.id, startEditingTitle])
+
   const dotColor =
     cell.status !== 'running'
       ? '#f85149'
@@ -54,7 +86,9 @@ export function TerminalCell({
       <header
         className="cell-header"
         title="Arrastra para intercambiar la posición con otra celda"
-        draggable
+        // Con el editor de título abierto el drag se apaga: si no, el header
+        // captura el mouse y no se puede ni seleccionar texto en el input.
+        draggable={!editingTitle}
         onDragStart={(e) => {
           e.dataTransfer.setData(CELL_MIME, cell.id)
           e.dataTransfer.effectAllowed = 'move'
@@ -85,9 +119,40 @@ export function TerminalCell({
               }
               style={{ background: dotColor }}
             />
-            <span className="cell-title" style={{ color: agent.color }}>
+            <span
+              className="cell-title"
+              style={{ color: agent.color }}
+              title="Doble clic para titular esta celda"
+              onDoubleClick={startEditingTitle}
+            >
               {cell.mode === 'chat' ? `💬 ${agent.label}` : agent.label}
             </span>
+            {editingTitle ? (
+              <input
+                className="cell-task-input"
+                autoFocus
+                value={titleDraft}
+                spellCheck={false}
+                placeholder="¿En qué anda esta celda? (vacío = automático)"
+                onMouseDown={(e) => e.stopPropagation()}
+                onChange={(e) => setTitleDraft(e.target.value)}
+                onBlur={commitTitle}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') commitTitle()
+                  else if (e.key === 'Escape') setEditingTitle(false)
+                }}
+              />
+            ) : (
+              task && (
+                <span
+                  className={`cell-task ${cell.title ? 'cell-task-manual' : ''}`}
+                  title={`${task}\n\nDoble clic para editar (vacío = automático)`}
+                  onDoubleClick={startEditingTitle}
+                >
+                  {task}
+                </span>
+              )
+            )}
             <span className="cell-cwd" title={cell.cwd}>
               {cell.cwd}
             </span>
@@ -168,6 +233,8 @@ export function TerminalCell({
               sessionId={cell.chatSessionId}
               model={cell.chatModel}
               effort={cell.chatEffort}
+              titled={task !== null}
+              onAutoTitle={(t) => onUpdate(cell.id, { autoTitle: t })}
               onModel={(m) => onUpdate(cell.id, { chatModel: m })}
               onEffort={(ef) => onUpdate(cell.id, { chatEffort: ef })}
               onSessionId={(sid) => onUpdate(cell.id, { chatSessionId: sid })}
@@ -187,6 +254,9 @@ export function TerminalCell({
             active={active}
             onExit={(code) => onUpdate(cell.id, { status: 'exited', exitCode: code })}
             onSession={(sid) => onUpdate(cell.id, { termSessionId: sid })}
+            onAutoTitle={(t) => {
+              if (t !== cell.autoTitle) onUpdate(cell.id, { autoTitle: t })
+            }}
             onActivity={(activity) => onUpdate(cell.id, { activity })}
             onAttention={() => onUpdate(cell.id, { attention: true })}
             onUserInput={() => {
@@ -230,6 +300,8 @@ interface TerminalViewProps {
   active: boolean
   onExit: (code: number) => void
   onSession: (sessionId: string) => void
+  /** Título OSC publicado por el TUI (Claude Code anuncia ahí su tarea). */
+  onAutoTitle: (title: string) => void
   onActivity: (activity: 'working' | 'idle') => void
   onAttention: () => void
   onUserInput: () => void
@@ -249,6 +321,7 @@ function TerminalView({
   active,
   onExit,
   onSession,
+  onAutoTitle,
   onActivity,
   onAttention,
   onUserInput,
@@ -256,8 +329,16 @@ function TerminalView({
 }: TerminalViewProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
-  const cbRef = useRef({ onExit, onSession, onActivity, onAttention, onUserInput, onOpenFile })
-  cbRef.current = { onExit, onSession, onActivity, onAttention, onUserInput, onOpenFile }
+  const cbRef = useRef({
+    onExit,
+    onSession,
+    onAutoTitle,
+    onActivity,
+    onAttention,
+    onUserInput,
+    onOpenFile
+  })
+  cbRef.current = { onExit, onSession, onAutoTitle, onActivity, onAttention, onUserInput, onOpenFile }
   const activeRef = useRef(active)
   activeRef.current = active
 
@@ -402,6 +483,14 @@ function TerminalView({
       if (!activeRef.current) cbRef.current.onAttention()
     })
 
+    // Título OSC 0/2: los agentes anuncian ahí en qué están trabajando. Los
+    // títulos que solo repiten el shell o el cwd se descartan (cleanTerminal-
+    // Title devuelve null) y la celda conserva el último título con sentido.
+    const titleDisp = term.onTitleChange((raw) => {
+      const clean = cleanTerminalTitle(raw, cwd)
+      if (clean) cbRef.current.onAutoTitle(clean)
+    })
+
     const inputDisp = term.onData((data) => {
       window.bridge.write(ptyId, data)
       cbRef.current.onUserInput()
@@ -494,6 +583,7 @@ function TerminalView({
       el.removeEventListener('contextmenu', onContextMenu)
       linkDisp.dispose()
       bellDisp.dispose()
+      titleDisp.dispose()
       selDisp.dispose()
       inputDisp.dispose()
       cleanups.forEach((off) => off())
