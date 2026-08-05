@@ -27,6 +27,8 @@ declare global {
       termMenu(hasSelection: boolean): Promise<string>
       writePrimary(text: string): void
       readPrimary(): string
+      writeClipboard(text: string): void
+      readClipboard(): string
       filePathFor(file: File): string
       dndDebug(info: unknown): void
       onMenuAction(cb: (action: string) => void): () => void

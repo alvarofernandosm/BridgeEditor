@@ -78,6 +78,11 @@ function buildAppMenu(): void {
         },
         { type: 'separator' },
         {
+          // Sin acelerador a propósito: registrar Ctrl+Shift+I se lo robaría al TUI.
+          label: 'Herramientas de desarrollo',
+          click: () => mainWindow?.webContents.toggleDevTools()
+        },
+        {
           label: 'GitHub del proyecto',
           click: () => shell.openExternal('https://github.com/alvarofernandosm/BridgeEditor')
         },

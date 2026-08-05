@@ -313,6 +313,35 @@ body {
   border-radius: 6px;
 }
 
+/* Aviso de copiar/pegar: confirma la acción sin robarle el foco a la terminal. */
+.term-flash {
+  position: absolute;
+  bottom: 10px;
+  right: 12px;
+  z-index: 5;
+  max-width: calc(100% - 24px);
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(13, 17, 23, 0.94);
+  color: var(--text);
+  font-size: 11px;
+  font-family: Menlo, Consolas, monospace;
+  pointer-events: none;
+  animation: term-flash-in 0.12s ease-out;
+}
+
+@keyframes term-flash-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
 .launcher {
   position: absolute;
   inset: 0;

@@ -329,6 +329,8 @@ function TerminalView({
 }: TerminalViewProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
+  const [flash, setFlash] = useState<string | null>(null)
+  const flashTimerRef = useRef<number | undefined>(undefined)
   const cbRef = useRef({
     onExit,
     onSession,
@@ -375,13 +377,67 @@ function TerminalView({
       }
     })
 
+    // Cada rama avisa en pantalla: antes, copiar sin selección o un portapapeles
+    // vacío no hacían nada y no había forma de distinguirlo de "el atajo no llegó".
+    const showFlash = (msg: string): void => {
+      setFlash(msg)
+      window.clearTimeout(flashTimerRef.current)
+      flashTimerRef.current = window.setTimeout(() => setFlash(null), 1800)
+    }
+
+    const alPortapapeles = (texto: string, origen: string): void => {
+      try {
+        window.bridge.writeClipboard(texto)
+        showFlash(`✓ copiado · ${texto.length} caracteres${origen}`)
+      } catch (err) {
+        showFlash(`✗ no se pudo copiar: ${String(err)}`)
+      }
+    }
+
     const copySelection = (): void => {
       const sel = term.getSelection()
-      if (sel) navigator.clipboard.writeText(sel)
+      if (sel) {
+        alPortapapeles(sel, '')
+        return
+      }
+      // xterm dice que no hay selección, pero puede haberla igual: en el DOM
+      // (encabezado, avisos) o en el portapapeles primario, que se rellena en
+      // cuanto arrastrás el mouse. Si la selección se perdió entre el arrastre y
+      // la tecla, el texto sigue en el primario: copiarlo de ahí rescata el caso
+      // y el aviso dice de dónde salió, así no se copia nada a ciegas.
+      const dom = window.getSelection()?.toString() ?? ''
+      if (dom) {
+        alPortapapeles(dom, ' · de la página')
+        return
+      }
+      const primario = window.bridge.platform === 'linux' ? window.bridge.readPrimary() : ''
+      if (primario) {
+        alPortapapeles(primario, ' · de la selección del mouse')
+        return
+      }
+      // Con el mouse capturado por el TUI (Claude Code lo hace para su scroll y
+      // sus clics) xterm le pasa el arrastre al agente y no selecciona nada. La
+      // salida es la de toda terminal: Shift fuerza la selección local.
+      showFlash(
+        term.modes.mouseTrackingMode !== 'none'
+          ? 'el agente tiene el mouse capturado — mantené Shift mientras arrastrás para seleccionar'
+          : 'no hay nada seleccionado — arrastrá el mouse sobre el texto'
+      )
     }
     const pasteClipboard = (): void => {
+      let text = ''
+      try {
+        text = window.bridge.readClipboard()
+      } catch (err) {
+        showFlash(`✗ no se pudo leer el portapapeles: ${String(err)}`)
+        return
+      }
+      if (!text) {
+        showFlash('el portapapeles está vacío')
+        return
+      }
       // term.paste respeta el bracketed paste mode de los TUI.
-      navigator.clipboard.readText().then((text) => text && term.paste(text))
+      term.paste(text)
     }
 
     term.attachCustomKeyEventHandler((e) => {
@@ -403,6 +459,40 @@ function TerminalView({
         return false
       }
       if (e.ctrlKey && e.shiftKey && !e.altKey && e.code === 'KeyV') {
+        e.preventDefault()
+        pasteClipboard()
+        return false
+      }
+      // Ctrl+C a secas: copia SOLO si hay selección, y la limpia al copiar; sin
+      // selección sigue siendo SIGINT. Así cancelar un turno nunca se pierde: el
+      // segundo Ctrl+C ya corta, porque el primero dejó la selección vacía. Es lo
+      // que hacen GNOME Terminal y Windows Terminal.
+      // El criterio es SOLO term.hasSelection(): mirar también window.getSelection()
+      // rompía el SIGINT, porque xterm deja texto seleccionado en su textarea
+      // interno y entonces Ctrl+C interceptaba siempre y no cortaba nunca.
+      if (e.ctrlKey && !e.shiftKey && !e.altKey && e.code === 'KeyC' && term.hasSelection()) {
+        e.preventDefault()
+        alPortapapeles(term.getSelection(), '')
+        term.clearSelection()
+        return false
+      }
+      // Ctrl+V pega. El costo asumido es el quoted-insert de readline (Ctrl+V ya
+      // no inserta el siguiente carácter literal) y el bloque visual de vim, que
+      // en estas terminales no se usan.
+      if (e.ctrlKey && !e.shiftKey && !e.altKey && e.code === 'KeyV') {
+        e.preventDefault()
+        pasteClipboard()
+        return false
+      }
+      // Ctrl+Insert / Shift+Insert: el otro par estándar de XTerm. Sirve de
+      // salida cuando algo fuera de la app (IME, atajo del escritorio, layout)
+      // se come el Ctrl+Shift+letra antes de que Chromium lo vea.
+      if (e.ctrlKey && !e.shiftKey && !e.altKey && e.code === 'Insert') {
+        e.preventDefault()
+        copySelection()
+        return false
+      }
+      if (e.shiftKey && !e.ctrlKey && !e.altKey && e.code === 'Insert') {
         e.preventDefault()
         pasteClipboard()
         return false
@@ -530,6 +620,33 @@ function TerminalView({
       }
     })
 
+    // OSC 52: la secuencia con la que un TUI copia al portapapeles del sistema.
+    // Claude Code la usa cuando seleccionás dentro de su propia UI (avisa "sent N
+    // chars via OSC 52") y xterm no la trae implementada, así que sin esto el
+    // copiado del agente se descartaba en silencio y al pegar salía lo anterior.
+    const oscDisp = term.parser.registerOscHandler(52, (data) => {
+      const sep = data.indexOf(';')
+      if (sep === -1) return true
+      const destinos = data.slice(0, sep)
+      const carga = data.slice(sep + 1)
+      // '?' es una LECTURA del portapapeles: no se responde a propósito, para no
+      // dejar que un agente se lleve lo que tengas copiado.
+      if (carga === '?') return true
+      let texto: string
+      try {
+        const bin = atob(carga)
+        texto = new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)))
+      } catch {
+        return true
+      }
+      if (!texto) return true
+      // Destino vacío = portapapeles, según la convención de xterm.
+      if (destinos === '' || destinos.includes('c')) window.bridge.writeClipboard(texto)
+      if (destinos.includes('p') || destinos.includes('s')) window.bridge.writePrimary(texto)
+      showFlash(`✓ copiado por el agente · ${texto.length} caracteres`)
+      return true
+    })
+
     // Selección con mouse → portapapeles primario (solo Linux), como toda terminal.
     const selDisp = term.onSelectionChange(() => {
       if (window.bridge.platform === 'linux' && term.hasSelection()) {
@@ -582,6 +699,7 @@ function TerminalView({
       el.removeEventListener('auxclick', onAuxClick)
       el.removeEventListener('contextmenu', onContextMenu)
       linkDisp.dispose()
+      oscDisp.dispose()
       bellDisp.dispose()
       titleDisp.dispose()
       selDisp.dispose()
@@ -611,27 +729,32 @@ function TerminalView({
 
   const [dragOver, setDragOver] = useState(false)
 
+  useEffect(() => () => window.clearTimeout(flashTimerRef.current), [])
+
   return (
-    <div
-      ref={containerRef}
-      className={`term-container ${dragOver ? 'drop-target' : ''}`}
-      onDragOver={(e) => {
-        // el drag de celdas pasa de largo hacia el grid-item (intercambio)
-        if (e.dataTransfer.types.includes(CELL_MIME)) return
-        e.preventDefault()
-        e.dataTransfer.dropEffect = 'copy'
-        setDragOver(true)
-      }}
-      onDragLeave={() => setDragOver(false)}
-      onDrop={(e) => {
-        if (e.dataTransfer.types.includes(CELL_MIME)) return
-        e.preventDefault()
-        setDragOver(false)
-        const paths = pathsFromDrop(e.dataTransfer)
-        if (paths.length === 0) return
-        termRef.current?.paste(quotePaths(paths))
-        termRef.current?.focus()
-      }}
-    />
+    <>
+      <div
+        ref={containerRef}
+        className={`term-container ${dragOver ? 'drop-target' : ''}`}
+        onDragOver={(e) => {
+          // el drag de celdas pasa de largo hacia el grid-item (intercambio)
+          if (e.dataTransfer.types.includes(CELL_MIME)) return
+          e.preventDefault()
+          e.dataTransfer.dropEffect = 'copy'
+          setDragOver(true)
+        }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={(e) => {
+          if (e.dataTransfer.types.includes(CELL_MIME)) return
+          e.preventDefault()
+          setDragOver(false)
+          const paths = pathsFromDrop(e.dataTransfer)
+          if (paths.length === 0) return
+          termRef.current?.paste(quotePaths(paths))
+          termRef.current?.focus()
+        }}
+      />
+      {flash && <div className="term-flash">{flash}</div>}
+    </>
   )
 }

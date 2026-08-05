@@ -14,6 +14,15 @@ const api = {
 
   readPrimary: (): string => (process.platform === 'linux' ? clipboard.readText('selection') : ''),
 
+  /** Portapapeles del sistema por el módulo nativo de Electron: a diferencia de
+      navigator.clipboard no depende del permiso clipboard-read ni de que el
+      documento tenga el foco (con el menú contextual abierto lo pierde), y es
+      sincrónico, así que un fallo se ve en el acto en vez de perderse en una
+      promesa rechazada sin catch. */
+  writeClipboard: (text: string): void => clipboard.writeText(text),
+
+  readClipboard: (): string => clipboard.readText(),
+
   /** Ruta real en disco de un File arrastrado (drag & drop). */
   filePathFor: (file: File): string => webUtils.getPathForFile(file),
 
