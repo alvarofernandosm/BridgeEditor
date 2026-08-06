@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { renderMarkdown } from './highlight'
 import { CELL_MIME, pathsFromDrop, quotePaths } from './dnd'
 import { titleFromPrompt } from './titles'
+import { detectAsk, type AskOption } from './ask'
 import { Palette } from './Palette'
 import type { AgentKind } from './App'
 
@@ -16,12 +17,16 @@ interface ChatMsg {
     | 'error'
     | 'proposal'
     | 'permission'
+    | 'ask'
   text: string
   name?: string
   /** Para 'proposal': celda destino del @delegate. */
   target?: string
-  /** Para 'proposal': pending | sent | dismissed */
+  /** Para 'proposal' y 'ask': pending | sent | dismissed */
   state?: 'pending' | 'sent' | 'dismissed'
+  /** Para 'ask': alternativas ofrecidas y la elegida. */
+  options?: AskOption[]
+  chosen?: string
   /** Para 'permission': id de la solicitud y directorios externos pedidos. */
   requestId?: string
   dirs?: string[]
@@ -110,6 +115,23 @@ function loadCtx(sessionId: string | null): CtxUsage | null {
   }
 }
 
+/** Agrega la tarjeta de opciones si la última respuesta del turno pregunta. */
+function withAskCard(ms: ChatMsg[]): ChatMsg[] {
+  const last = ms.map((m) => m.role).lastIndexOf('assistant')
+  if (last < 0) return ms
+  if (ms.slice(last).some((m) => m.role === 'ask')) return ms // ya tiene tarjeta
+  const found = detectAsk(ms[last].text)
+  if (!found) return ms
+  const next = [...ms]
+  if (found.cleaned !== next[last].text) next[last] = { ...next[last], text: found.cleaned }
+  next.push({
+    role: 'ask',
+    text: found.ask.question ?? '',
+    options: found.ask.options,
+    state: 'pending'
+  })
+  return next
+}
 
 const fmtCtx = (n: number): string =>
   n >= 1_000_000 ? `${(n / 1_000_000).toFixed(2)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(n)
@@ -253,6 +275,9 @@ export function ChatView({
           }
           if (ev.error) setMessages((ms) => [...ms, { role: 'error', text: ev.error! }])
           else if (ev.meta) setMessages((ms) => [...ms, { role: 'meta', text: ev.meta! }])
+          // ¿El turno terminó preguntando? Se mira sólo la última respuesta: una
+          // lista enumerada a mitad de camino no es una pregunta al usuario.
+          if (!ev.error && !compactingRef.current) setMessages(withAskCard)
           if (compactingRef.current) {
             compactingRef.current = false
             if (!ev.error) {
@@ -459,6 +484,25 @@ export function ChatView({
       })
   }
 
+  // Elegir una opción de una tarjeta de pregunta: se envía como un mensaje del
+  // usuario normal (el agente no distingue el clic de haberlo escrito a mano).
+  const answerAsk = (index: number, option: AskOption): void => {
+    if (running) return
+    setMessages((ms) =>
+      ms.map((m, i) =>
+        i === index && m.role === 'ask' && m.state === 'pending'
+          ? { ...m, state: 'sent' as const, chosen: option.label }
+          : m
+      )
+    )
+    sendText(option.label)
+  }
+
+  const dismissAsk = (index: number): void => {
+    setMessages((ms) => ms.map((m, i) => (i === index ? { ...m, state: 'dismissed' as const } : m)))
+    inputRef.current?.focus()
+  }
+
   const send = (): void => {
     const message = input.trim()
     if (!message || running) return
@@ -563,6 +607,37 @@ export function ChatView({
                 ) : (
                   <span className="chat-proposal-state">
                     {m.state === 'sent' ? '✓ delegada' : 'ignorada'}
+                  </span>
+                )}
+              </div>
+            )
+          }
+          if (m.role === 'ask') {
+            return (
+              <div key={i} className="chat-ask">
+                <span className="chat-ask-head">
+                  🤔 {m.text || 'El agente necesita que elijas'}
+                </span>
+                {m.state === 'pending' ? (
+                  <div className="chat-ask-actions">
+                    {(m.options ?? []).map((o, k) => (
+                      <button
+                        key={k}
+                        className="chat-ask-option"
+                        title={o.detail || o.label}
+                        disabled={running}
+                        onClick={() => answerAsk(i, o)}
+                      >
+                        {o.label}
+                      </button>
+                    ))}
+                    <button className="chat-ask-skip" onClick={() => dismissAsk(i)}>
+                      ✎ responder a mano
+                    </button>
+                  </div>
+                ) : (
+                  <span className="chat-ask-state">
+                    {m.state === 'sent' ? `✓ elegiste: ${m.chosen}` : 'respondiendo a mano'}
                   </span>
                 )}
               </div>

@@ -647,6 +647,68 @@ body {
   font-size: 11px;
 }
 
+.chat-ask {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: rgba(88, 166, 255, 0.08);
+  border: 1px solid rgba(88, 166, 255, 0.4);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 12.5px;
+}
+
+.chat-ask-head {
+  font-weight: 600;
+  color: #58a6ff;
+  font-size: 11.5px;
+}
+
+.chat-ask-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chat-ask-option {
+  background: var(--panel);
+  border: 1px solid rgba(88, 166, 255, 0.5);
+  color: #58a6ff;
+  border-radius: 6px;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+  max-width: 100%;
+}
+
+.chat-ask-option:hover:not(:disabled) {
+  background: rgba(88, 166, 255, 0.15);
+}
+
+.chat-ask-option:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.chat-ask-skip {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 11.5px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.chat-ask-state {
+  color: var(--muted);
+  font-size: 11px;
+}
+
 /* Ocupación del contexto: vive en la barra de estado, a la derecha, para no
    competir con el mensaje que se está escribiendo. */
 .chat-ctx {

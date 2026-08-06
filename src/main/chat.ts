@@ -119,6 +119,20 @@ const HEADLESS_NOTE =
   '--force, --non-interactive) y verifica precondiciones antes (p. ej. git ' +
   'status limpio antes de codemods).'
 
+// Preguntas al usuario: en headless no hay TUI que las presente, así que en vez
+// de dejarlas enterradas en la prosa ("¿opción a, b o c?") el agente las cierra
+// con un bloque `ask` y BridgeEditor las pinta como botones. Las respuestas en
+// prosa siguen funcionando: la vista de chat también las detecta (ver ask.ts).
+const ASK_CONTRACT =
+  ' Cuando necesites que el usuario decida entre alternativas, termina tu ' +
+  'respuesta con un bloque de código de lenguaje `ask` que contenga JSON: ' +
+  '{"question": "la pregunta", "options": [{"label": "opción corta", "detail": ' +
+  '"qué implica"}]}. La app lo muestra como botones y envía la opción elegida ' +
+  'como tu siguiente mensaje. Úsalo sólo para decisiones que son del usuario ' +
+  '(2 a 4 opciones), nunca para confirmaciones triviales ni para pedir permiso ' +
+  'de algo que ya te pidieron; explica el contexto en el texto normal antes del ' +
+  'bloque, no dentro del JSON.'
+
 /** El comando del agente como argv SIN escapar: cada plataforma lo lanza a su
  * manera (ver spawnAgent), y el quoting es cosa de quien lo lanza. */
 function buildArgv(opts: ChatSendOpts): { file: string; args: string[] } {
@@ -133,7 +147,7 @@ function buildArgv(opts: ChatSendOpts): { file: string; args: string[] } {
   }
   if (opts.agent === 'claude') {
     const flags = ['-p', opts.message, '--output-format', 'stream-json', '--verbose']
-    flags.push('--append-system-prompt', HEADLESS_NOTE)
+    flags.push('--append-system-prompt', HEADLESS_NOTE + ASK_CONTRACT)
     if (opts.model) flags.push('--model', opts.model)
     if (opts.effort) flags.push('--effort', opts.effort)
     if (opts.sessionId) flags.push('--resume', opts.sessionId)

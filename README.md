@@ -221,6 +221,13 @@ se persiste en el perfil de la app.
   de 1M sin adivinar; mientras no lo conozca muestra sólo los tokens. Las
   ventanas aprendidas se guardan en `userData` y la ocupación por sesión, así
   que ambas sobreviven reinicios de la app.
+- **Preguntas con botones**: cuando el agente termina un turno ofreciendo
+  alternativas, la app las convierte en una tarjeta con un botón por opción —
+  al pulsar, la opción se envía como tu siguiente mensaje. Funciona por dos
+  vías: a los chats de Claude se les pide cerrar con un bloque ` ```ask ` con
+  JSON (`question` + `options`), y para cualquier agente se detecta la prosa
+  del tipo `(a) … (b) … (c) …` cuando el mensaje pide elegir. Siempre queda el
+  botón *responder a mano* para escribir libremente.
 - **Slash commands del chat**: `/resume` abre un selector visual de sesiones
   anteriores del directorio (botón ↺ también), `/continue` retoma la más
   reciente, `/new` empieza conversación nueva y `/help` muestra la ayuda.
