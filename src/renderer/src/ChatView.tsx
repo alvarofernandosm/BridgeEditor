@@ -5,7 +5,16 @@ import { titleFromPrompt } from './titles'
 import type { AgentKind } from './App'
 
 interface ChatMsg {
-  role: 'user' | 'remote-user' | 'assistant' | 'thinking' | 'tool' | 'meta' | 'error' | 'proposal' | 'permission'
+  role:
+    | 'user'
+    | 'remote-user'
+    | 'assistant'
+    | 'thinking'
+    | 'tool'
+    | 'meta'
+    | 'error'
+    | 'proposal'
+    | 'permission'
   text: string
   name?: string
   /** Para 'proposal': celda destino del @delegate. */
@@ -77,6 +86,7 @@ const PERM_LABELS: Record<ChatPerm, string> = {
   full: 'sin preguntar'
 }
 
+
 export function ChatView({
   cellId,
   agent,
@@ -95,9 +105,7 @@ export function ChatView({
   onAttention
 }: ChatViewProps): JSX.Element {
   const [messages, setMessages] = useState<ChatMsg[]>(() =>
-    sessionId && (agent === 'claude' || agent === 'antigravity')
-      ? [{ role: 'meta', text: 'continuando la sesión anterior' }]
-      : []
+    sessionId ? [{ role: 'meta', text: 'continuando la sesión anterior' }] : []
   )
   const [input, setInput] = useState('')
   const [running, setRunning] = useState(false)
@@ -105,12 +113,16 @@ export function ChatView({
   const [permMode, setPermMode] = useState<ChatPerm>(initialPerm)
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null)
   const [models, setModels] = useState<string[]>([])
+  // Permisos, modelo y effort viven en un panel plegable: en una grilla de 3+
+  // celdas los selectores en línea dejaban el campo de texto sin ancho.
+  const [optsOpen, setOptsOpen] = useState(false)
 
   useEffect(() => {
     window.bridge.chatModels(agent).then(setModels)
   }, [agent])
   const listRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  const bottomRef = useRef<HTMLDivElement>(null)
   const sessionRef = useRef(sessionId)
   const activeRef = useRef(active)
   activeRef.current = active
@@ -120,7 +132,6 @@ export function ChatView({
   // como contexto al próximo mensaje del usuario en la sesión nueva.
   const compactingRef = useRef(false)
   const pendingContextRef = useRef<string | null>(null)
-
   useEffect(() => {
     const off = window.bridge.onChatEvent(cellId, (ev) => {
       switch (ev.kind) {
@@ -235,6 +246,23 @@ export function ChatView({
   useEffect(() => {
     if (active && !running) inputRef.current?.focus()
   }, [active, running])
+
+  // El panel de opciones se cierra al tocar fuera o con Escape.
+  useEffect(() => {
+    if (!optsOpen) return
+    const onDown = (e: MouseEvent): void => {
+      if (!bottomRef.current?.contains(e.target as Node)) setOptsOpen(false)
+    }
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setOptsOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [optsOpen])
 
   // Ctrl+Shift+A/D desde App: insertar la ruta elegida en el mensaje.
   useEffect(() => {
@@ -380,6 +408,17 @@ export function ChatView({
     }
     sendText(message)
   }
+
+  // Lo que el panel esconde sigue a la vista en la barra de estado: qué
+  // permisos, qué modelo y qué effort está usando la celda ahora mismo.
+  const configSummary =
+    [
+      agent === 'claude' ? PERM_LABELS[permMode] : null,
+      model ?? (models.length > 0 ? 'modelo por defecto' : null),
+      effort ? `effort ${effort}` : null
+    ]
+      .filter(Boolean)
+      .join(' · ') || 'opciones del chat'
 
   return (
     <div
@@ -559,87 +598,118 @@ export function ChatView({
           </ul>
         </div>
       )}
-      <div className="chat-composer">
-        {agent === 'claude' && (
+      <div className="chat-bottom" ref={bottomRef}>
+        {optsOpen && (
+          <div className="chat-opts">
+            {agent === 'claude' && (
+              <label className="chat-opt">
+                <span>Permisos</span>
+                <select
+                  value={permMode}
+                  onChange={(e) => setPermMode(e.target.value as ChatPerm)}
+                >
+                  {(Object.keys(PERM_LABELS) as Array<keyof typeof PERM_LABELS>).map((k) => (
+                    <option key={k} value={k}>
+                      {PERM_LABELS[k]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {models.length > 0 && (
+              <label className="chat-opt">
+                <span>Modelo</span>
+                <select value={model ?? ''} onChange={(e) => onModel(e.target.value || null)}>
+                  <option value="">modelo por defecto</option>
+                  {models.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {EFFORT_OPTIONS[agent].length > 0 && (
+              <label className="chat-opt" title="claude --effort / opencode --variant">
+                <span>Razonamiento</span>
+                <select value={effort ?? ''} onChange={(e) => onEffort(e.target.value || null)}>
+                  <option value="">effort auto</option>
+                  {EFFORT_OPTIONS[agent].map((ef) => (
+                    <option key={ef} value={ef}>
+                      {ef}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {agent === 'claude' && (
+              <button
+                className="chat-opt-action"
+                onClick={() => {
+                  setOptsOpen(false)
+                  handleSlash('/resume')
+                }}
+              >
+                ↺ Sesiones anteriores…
+              </button>
+            )}
+          </div>
+        )}
+        <div className="chat-status">
           <button
-            className="chat-resume-btn"
-            title="Sesiones anteriores (/resume)"
-            onClick={() => handleSlash('/resume')}
+            className="chat-status-config"
+            title="Permisos, modelo y razonamiento de este chat"
+            onClick={() => setOptsOpen((open) => !open)}
           >
-            ↺
+            {configSummary}
           </button>
-        )}
-        {agent === 'claude' && (
-          <select
-            value={permMode}
-            title="Permisos del agente en este chat"
-            onChange={(e) => setPermMode(e.target.value as ChatPerm)}
+        </div>
+        <div className="chat-composer">
+          <button
+            className={`chat-opts-btn${optsOpen ? ' open' : ''}`}
+            title={`Opciones del chat — ${configSummary}`}
+            onClick={() => setOptsOpen((open) => !open)}
           >
-            {(Object.keys(PERM_LABELS) as Array<keyof typeof PERM_LABELS>).map((k) => (
-              <option key={k} value={k}>
-                {PERM_LABELS[k]}
-              </option>
-            ))}
-          </select>
-        )}
-        {models.length > 0 && (
-          <select
-            className="chat-model"
-            value={model ?? ''}
-            title="Modelo de este chat"
-            onChange={(e) => onModel(e.target.value || null)}
-          >
-            <option value="">modelo por defecto</option>
-            {models.map((m) => (
-              <option key={m} value={m}>
-                {m}
-              </option>
-            ))}
-          </select>
-        )}
-        {EFFORT_OPTIONS[agent].length > 0 && (
-          <select
-            className="chat-model"
-            value={effort ?? ''}
-            title="Nivel de razonamiento (claude --effort / opencode --variant)"
-            onChange={(e) => onEffort(e.target.value || null)}
-          >
-            <option value="">effort auto</option>
-            {EFFORT_OPTIONS[agent].map((ef) => (
-              <option key={ef} value={ef}>
-                effort {ef}
-              </option>
-            ))}
-          </select>
-        )}
-        <textarea
-          ref={inputRef}
-          value={input}
-          rows={2}
-          placeholder={
-            awaitingPerm
-              ? 'Esperando tu autorización…'
-              : running
-                ? 'El agente está trabajando…'
-                : 'Escribe un mensaje (Enter envía)'
-          }
-          disabled={running || awaitingPerm}
-          spellCheck={false}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault()
-              send()
+            <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
+              <path
+                d="M2.5 7.5 6 4l3.5 3.5"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.7"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </button>
+          <textarea
+            ref={inputRef}
+            value={input}
+            rows={2}
+            placeholder={
+              awaitingPerm
+                ? 'Esperando tu autorización…'
+                : running
+                  ? 'El agente está trabajando…'
+                  : 'Escribe un mensaje (Enter envía)'
             }
-          }}
-        />
-        <button
-          className="chat-send"
-          onClick={send}
-          disabled={running || awaitingPerm || !input.trim()}
-        >
-          ➤
-        </button>
+            disabled={running || awaitingPerm}
+            spellCheck={false}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault()
+                send()
+              }
+            }}
+          />
+          <button
+            className="chat-send"
+            onClick={send}
+            disabled={running || awaitingPerm || !input.trim()}
+          >
+            ➤
+          </button>
+        </div>
       </div>
     </div>
   )

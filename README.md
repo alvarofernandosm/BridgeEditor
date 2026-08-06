@@ -186,6 +186,12 @@ se persiste en el perfil de la app.
   herramientas usadas (🔧 Bash, Edit, …), costo y duración de cada turno.
 - La conversación continúa entre turnos (`--resume` / `--continue`) e incluso
   **sobrevive reinicios de la app** (la sesión de claude se guarda en el layout).
+- **Panel de opciones plegable**: permisos, modelo, razonamiento y sesiones
+  anteriores viven detrás del chevron (⌃) a la izquierda del compositor, para
+  que el campo de texto se quede con todo el ancho — con 3+ celdas en la
+  grilla los selectores en línea no dejaban sitio para escribir. Lo que está
+  activo se sigue viendo en la barra de estado (`sin preguntar · opus ·
+  effort xhigh`), que también abre el panel al pulsarla.
 - Selector de permisos por chat (solo claude): *solo planear*, *acepta
   ediciones* (default) o *sin preguntar*.
 - **Selector de modelo por chat**: en OpenCode lista los modelos reales de tu
