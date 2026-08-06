@@ -173,12 +173,17 @@ export function TerminalCell({
         <button
           className="icon-btn"
           title="Cerrar celda"
-          onClick={() => {
+          onClick={(e) => {
             const busy =
               cell.status === 'running' && (cell.mode === 'term' || cell.activity === 'working')
             if (busy && !window.confirm('Esta celda tiene un proceso corriendo. ¿Cerrarla y terminarlo?')) {
               return
             }
+            // Soltar el foco antes de que el botón desaparezca con la celda: un
+            // elemento enfocado que se destruye deja el teclado en el body, y
+            // ahí el espacio y las mayúsculas se pierden hasta que la ventana
+            // recupera el foco (ver el refoco en App.closeCell).
+            e.currentTarget.blur()
             onClose(cell.id)
           }}
         >
@@ -706,6 +711,11 @@ function TerminalView({
       inputDisp.dispose()
       cleanups.forEach((off) => off())
       window.bridge.kill(ptyId)
+      // xterm escribe en un <textarea> oculto: destruirlo mientras tiene el
+      // foco deja al IME de Linux con la composición colgada (traga espacios y
+      // mayúsculas). Con blur primero, el foco se libera en orden.
+      const focused = document.activeElement
+      if (focused instanceof HTMLElement && el.contains(focused)) focused.blur()
       term.dispose()
       termRef.current = null
     }
@@ -726,6 +736,16 @@ function TerminalView({
   useEffect(() => {
     if (active) termRef.current?.focus()
   }, [active])
+
+  // Reclamar el teclado cuando otra celda se cierra (ver App.closeCell).
+  useEffect(() => {
+    const onFocusCell = (e: Event): void => {
+      const detail = (e as CustomEvent).detail as { cellId: string }
+      if (detail.cellId === cellId) termRef.current?.focus()
+    }
+    window.addEventListener('bridge:focus-cell', onFocusCell)
+    return () => window.removeEventListener('bridge:focus-cell', onFocusCell)
+  }, [cellId])
 
   const [dragOver, setDragOver] = useState(false)
 

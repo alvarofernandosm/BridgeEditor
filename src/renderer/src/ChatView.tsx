@@ -360,6 +360,16 @@ export function ChatView({
     return () => window.removeEventListener('bridge:insert-path', onInsert)
   }, [cellId])
 
+  // Reclamar el teclado cuando otra celda se cierra (ver App.closeCell).
+  useEffect(() => {
+    const onFocusCell = (e: Event): void => {
+      const detail = (e as CustomEvent).detail as { cellId: string }
+      if (detail.cellId === cellId) inputRef.current?.focus()
+    }
+    window.addEventListener('bridge:focus-cell', onFocusCell)
+    return () => window.removeEventListener('bridge:focus-cell', onFocusCell)
+  }, [cellId])
+
   const addMeta = (text: string): void => setMessages((ms) => [...ms, { role: 'meta', text }])
 
   const pickSession = (s: SessionInfo): void => {

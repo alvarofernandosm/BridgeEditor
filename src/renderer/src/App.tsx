@@ -253,11 +253,22 @@ export default function App(): JSX.Element {
       setCells(next)
       // Si se cerró la celda activa, activar la vecina: deja el foco en un
       // terminal vivo (un activeId muerto deja el teclado en tierra de nadie).
-      setActiveId((cur) =>
-        cur === id ? (next[Math.max(0, Math.min(idx, next.length - 1))]?.id ?? null) : cur
-      )
+      const neighbour = next[Math.max(0, Math.min(idx, next.length - 1))]?.id ?? null
+      setActiveId((cur) => (cur === id ? neighbour : cur))
+      // Y devolver el foco a mano: cerrar destruye el elemento que lo tenía (el
+      // botón ✕, o el textarea de xterm) y el navegador lo deja en el body, donde
+      // el espacio y las mayúsculas no llegan a ninguna parte. Cambiar activeId
+      // no basta: si la celda cerrada no era la activa, nadie se reenfoca.
+      const focusId = activeId === id || activeId === null ? neighbour : activeId
+      if (focusId) {
+        requestAnimationFrame(() =>
+          window.dispatchEvent(
+            new CustomEvent('bridge:focus-cell', { detail: { cellId: focusId } })
+          )
+        )
+      }
     },
-    [cells]
+    [cells, activeId]
   )
 
   const updateCell = useCallback((id: string, patch: Partial<CellState>) => {
