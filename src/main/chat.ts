@@ -590,6 +590,19 @@ function reportClaudeContext(ev: any, state: ClaudeTurnState, send: SendFn): voi
   send({ kind: 'usage', contextTokens: context, contextWindow: knownContextWindow(state.model) })
 }
 
+/** Lo que se muestra como detalle de una herramienta (chip 🔧 del chat). */
+function toolDetail(input: Record<string, unknown>): string {
+  const detail =
+    input.command ??
+    input.file_path ??
+    input.path ??
+    input.pattern ??
+    input.url ??
+    input.description ??
+    (typeof input.prompt === 'string' ? input.prompt.slice(0, 80) : '')
+  return String(detail ?? '').slice(0, 140)
+}
+
 function handleClaudeEvent(
   ev: any,
   state: ClaudeTurnState,
@@ -614,15 +627,7 @@ function handleClaudeEvent(
           send({ kind: 'tool', name: `Subagente${kind}`, detail: String(what).slice(0, 140) })
           continue
         }
-        const detail =
-          input.command ??
-          input.file_path ??
-          input.path ??
-          input.pattern ??
-          input.url ??
-          input.description ??
-          (typeof input.prompt === 'string' ? input.prompt.slice(0, 80) : '')
-        send({ kind: 'tool', name: block.name, detail: String(detail).slice(0, 140) })
+        send({ kind: 'tool', name: block.name, detail: toolDetail(input) })
       }
     }
   } else if (ev.type === 'result') {
@@ -1131,6 +1136,211 @@ export async function executeDelegatedTurn(
   }
 }
 
+/** Directorio donde Claude Code guarda las sesiones de un proyecto. */
+const claudeProjectDir = (cwd: string): string =>
+  join(homedir(), '.claude', 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'))
+
+export interface TranscriptMsg {
+  role: 'user' | 'assistant' | 'tool'
+  text: string
+  name?: string
+}
+
+interface TranscriptRequest {
+  agent: 'claude' | 'opencode' | 'antigravity'
+  cwd: string
+  sessionId: string
+  limit?: number
+}
+
+interface SessionsRequest {
+  agent: 'claude' | 'opencode' | 'antigravity'
+  cwd: string
+}
+
+/**
+ * Arma el historial de una sesión. Las herramientas de un mismo tramo se
+ * resumen en una línea: un turno de trabajo largo son decenas de chips que
+ * entierran la conversación, que es justo lo que se viene a leer al retomar.
+ */
+function transcriptBuilder(): {
+  tool: (name: string, detail: string) => void
+  say: (role: 'user' | 'assistant', text: string) => void
+  done: () => TranscriptMsg[]
+} {
+  const messages: TranscriptMsg[] = []
+  let pending: Array<{ name: string; detail: string }> = []
+  const flush = (): void => {
+    if (pending.length === 1) {
+      messages.push({ role: 'tool', name: pending[0].name, text: pending[0].detail })
+    } else if (pending.length > 1) {
+      const kinds = [...new Set(pending.map((p) => p.name))].slice(0, 5).join(' · ')
+      messages.push({ role: 'tool', name: `${pending.length} herramientas`, text: kinds })
+    }
+    pending = []
+  }
+  return {
+    tool: (name, detail) => pending.push({ name, detail }),
+    say: (role, text) => {
+      flush()
+      messages.push({ role, text: text.slice(0, 4000) })
+    },
+    done: () => {
+      flush()
+      return messages
+    }
+  }
+}
+
+/** Recorta al final contando sólo el diálogo: los chips no gastan cupo. */
+function tailByDialog(messages: TranscriptMsg[], limit: number): TranscriptMsg[] {
+  let dialog = 0
+  let start = 0
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'tool') continue
+    if (++dialog > limit) {
+      start = i + 1
+      break
+    }
+  }
+  return messages.slice(start).slice(-limit * 4)
+}
+
+/** Lanza un subcomando de opencode y devuelve su stdout (vacío si falla). */
+function runOpencode(args: string[], cwd: string, timeoutMs = 30000): Promise<string> {
+  return new Promise((resolve) => {
+    let out = ''
+    let child: ChildProcessByStdio<null, Readable, Readable>
+    try {
+      child = spawnAgent('opencode', args, {
+        cwd,
+        env: { ...process.env, TERM: 'dumb' } as Record<string, string>,
+        stdio: ['ignore', 'pipe', 'pipe']
+      })
+    } catch {
+      resolve('')
+      return
+    }
+    const timer = setTimeout(() => {
+      child.kill()
+      resolve('')
+    }, timeoutMs)
+    child.stdout.on('data', (d: Buffer) => (out += d.toString()))
+    child.on('close', () => {
+      clearTimeout(timer)
+      resolve(stripAnsi(out))
+    })
+    child.on('error', () => {
+      clearTimeout(timer)
+      resolve('')
+    })
+  })
+}
+
+// Fila de `opencode session list`: id, título y fecha ya formateada, separados
+// por dos o más espacios (el título puede llevar espacios sueltos).
+const OC_SESSION_ROW = /^(ses_\S+)\s{2,}(.*?)\s{2,}(\S.*?)\s*$/
+
+/** Sesiones de opencode del directorio (el CLI ya filtra por proyecto). */
+async function opencodeSessions(cwd: string): Promise<SessionSummary[]> {
+  const out = await runOpencode(['session', 'list'], cwd)
+  const sessions: SessionSummary[] = []
+  for (const line of out.split('\n')) {
+    const row = OC_SESSION_ROW.exec(line)
+    if (!row) continue
+    // "New session - <ISO>" es el título automático de opencode: no dice nada
+    // que la fecha de al lado no diga ya, así que se muestra el id corto.
+    const title = /^New session - \d{4}-/.test(row[2].trim()) ? '' : row[2].trim()
+    sessions.push({ id: row[1], mtimeMs: 0, summary: title, when: row[3].trim() })
+    if (sessions.length >= 20) break
+  }
+  return sessions
+}
+
+/** Historial de una sesión de opencode (`opencode export` devuelve JSON). */
+async function opencodeTranscript(cwd: string, sessionId: string): Promise<TranscriptMsg[]> {
+  const out = await runOpencode(['export', sessionId], cwd, 60000)
+  let data: { messages?: Array<{ info?: { role?: string }; parts?: any[] }> }
+  try {
+    data = JSON.parse(out)
+  } catch {
+    return []
+  }
+  const build = transcriptBuilder()
+  for (const message of data.messages ?? []) {
+    const role = message.info?.role
+    if (role !== 'user' && role !== 'assistant') continue
+    for (const part of message.parts ?? []) {
+      if (part?.type === 'text' && typeof part.text === 'string' && part.text.trim()) {
+        build.say(role, part.text.trim())
+      } else if (part?.type === 'tool' && role === 'assistant') {
+        const input = part.state?.input ?? {}
+        const detail = String(
+          input.command ?? input.filePath ?? input.path ?? input.pattern ?? input.url ?? ''
+        ).slice(0, 140)
+        build.tool(String(part.tool ?? 'tool'), detail)
+      }
+      // 'reasoning' y 'step-start' se omiten: son ruido en un historial.
+    }
+  }
+  return build.done()
+}
+
+/** Historial de una sesión de Claude Code (su .jsonl del proyecto). */
+async function claudeTranscript(cwd: string, sessionId: string): Promise<TranscriptMsg[]> {
+  let content: string
+  try {
+    content = await readFile(join(claudeProjectDir(cwd), `${sessionId}.jsonl`), 'utf8')
+  } catch {
+    return []
+  }
+  const build = transcriptBuilder()
+  for (const line of content.split('\n')) {
+    if (!line.trim()) continue
+    let entry: any
+    try {
+      entry = JSON.parse(line)
+    } catch {
+      continue // línea truncada (la sesión puede seguir viva)
+    }
+    // isSidechain = turno de un subagente: ruido en el hilo principal.
+    if (entry.isSidechain || entry.isMeta) continue
+    if (entry.type === 'user' && entry.message) {
+      const raw = entry.message.content
+      const text = (
+        typeof raw === 'string'
+          ? raw
+          : Array.isArray(raw)
+            ? raw
+                .filter((b: { type?: string }) => b?.type === 'text')
+                .map((b: { text?: string }) => b.text ?? '')
+                .join('\n')
+            : ''
+      ).trim()
+      // '<' = mensajes internos del harness (recordatorios, resultados)
+      if (!text || text.startsWith('<')) continue
+      build.say('user', text)
+    } else if (entry.type === 'assistant' && Array.isArray(entry.message?.content)) {
+      for (const block of entry.message.content) {
+        if (block?.type === 'text' && block.text?.trim()) {
+          build.say('assistant', String(block.text))
+        } else if (block?.type === 'tool_use') {
+          build.tool(String(block.name ?? 'tool'), toolDetail(block.input ?? {}))
+        }
+      }
+    }
+  }
+  return build.done()
+}
+
+export interface SessionSummary {
+  id: string
+  mtimeMs: number
+  summary: string
+  /** Fecha ya formateada por el CLI (opencode); claude usa mtimeMs. */
+  when?: string
+}
+
 export function registerChatHandlers(): void {
   ipcMain.handle('chat:send', async (event, opts: ChatSendOpts) => {
     const wc: WebContents = event.sender
@@ -1158,11 +1368,31 @@ export function registerChatHandlers(): void {
 
   ipcMain.handle('chat:models', (_event, agent: 'claude' | 'opencode') => listChatModels(agent))
 
-  // Lista las sesiones guardadas de Claude Code para un proyecto, leyendo los
-  // .jsonl de ~/.claude/projects/<ruta-codificada>/. Soporta el /resume del chat.
-  ipcMain.handle('chat:sessions', async (_event, cwd: string) => {
-    const encoded = cwd.replace(/[^a-zA-Z0-9]/g, '-')
-    const dir = join(homedir(), '.claude', 'projects', encoded)
+  // Historial de una sesión de Claude Code para pintarlo al retomarla: sin él,
+  // el chat quedaba en blanco y no había forma de saber si era la conversación
+  // que buscabas. Se devuelven los últimos `limit` mensajes ya normalizados.
+  ipcMain.handle(
+    'chat:transcript',
+    async (_event, { agent, cwd, sessionId, limit = 40 }: TranscriptRequest) => {
+      const messages =
+        agent === 'opencode'
+          ? await opencodeTranscript(cwd, sessionId)
+          : await claudeTranscript(cwd, sessionId)
+      // `total` cuenta sólo el diálogo, que es lo que el límite recorta.
+      const total = messages.filter((m) => m.role !== 'tool').length
+      return { messages: tailByDialog(messages, limit), total }
+    }
+  )
+
+  // Sesiones anteriores del directorio para el /resume del chat: en claude se
+  // leen los .jsonl de ~/.claude/projects/<ruta-codificada>/; en opencode las
+  // da su propio CLI (viven en su base de datos, no en archivos sueltos).
+  ipcMain.handle('chat:sessions', async (_event, arg: SessionsRequest | string) => {
+    // string = forma antigua (sólo claude), por si queda una vista sin migrar
+    const { agent, cwd } = typeof arg === 'string' ? { agent: 'claude' as const, cwd: arg } : arg
+    if (agent === 'opencode') return opencodeSessions(cwd)
+    if (agent !== 'claude') return []
+    const dir = claudeProjectDir(cwd)
     let names: string[]
     try {
       names = await readdir(dir)

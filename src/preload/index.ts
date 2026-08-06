@@ -56,8 +56,22 @@ const api = {
   chatPermission: (requestId: string, decision: 'once' | 'all' | 'reject'): void =>
     ipcRenderer.send('chat:permission-response', { requestId, decision }),
 
-  chatSessions: (cwd: string): Promise<Array<{ id: string; mtimeMs: number; summary: string }>> =>
-    ipcRenderer.invoke('chat:sessions', cwd),
+  /** Sesiones anteriores del directorio (claude por archivos, opencode por CLI). */
+  chatSessions: (
+    agent: 'claude' | 'opencode' | 'antigravity',
+    cwd: string
+  ): Promise<Array<{ id: string; mtimeMs: number; summary: string; when?: string }>> =>
+    ipcRenderer.invoke('chat:sessions', { agent, cwd }),
+
+  /** Historial de una sesión, para pintarlo al retomarla. */
+  chatTranscript: (
+    agent: 'claude' | 'opencode' | 'antigravity',
+    cwd: string,
+    sessionId: string
+  ): Promise<{
+    messages: Array<{ role: 'user' | 'assistant' | 'tool'; text: string; name?: string }>
+    total: number
+  }> => ipcRenderer.invoke('chat:transcript', { agent, cwd, sessionId }),
 
   onChatEvent: (id: string, cb: (ev: unknown) => void): (() => void) => {
     const channel = `chat:event:${id}`

@@ -228,9 +228,18 @@ se persiste en el perfil de la app.
   JSON (`question` + `options`), y para cualquier agente se detecta la prosa
   del tipo `(a) … (b) … (c) …` cuando el mensaje pide elegir. Siempre queda el
   botón *responder a mano* para escribir libremente.
+- **Historial al retomar**: al elegir una sesión con `/resume` (o al reabrir la
+  app con una celda que traía sesión) el chat pinta la conversación guardada —
+  los últimos 40 mensajes — en vez de un escueto "sesión retomada" que no
+  dejaba reconocerla. Los turnos de subagentes se filtran y las herramientas se
+  resumen por tramo (`🔧 12 herramientas · Edit · Bash`) para que se lea la
+  conversación, no el andamiaje. En Claude sale del `.jsonl` del proyecto; en
+  **OpenCode** de su propio CLI (`opencode session list` + `opencode export`),
+  que guarda las sesiones en su base de datos y ya filtra por directorio.
 - **Slash commands del chat**: `/resume` abre un selector visual de sesiones
-  anteriores del directorio (botón ↺ también), `/continue` retoma la más
-  reciente, `/new` empieza conversación nueva y `/help` muestra la ayuda.
+  anteriores del directorio (en Claude y OpenCode; también desde el panel de
+  opciones), `/continue` retoma la más reciente, `/new` empieza conversación
+  nueva y `/help` muestra la ayuda.
   Cualquier otro `/comando` se envía al agente — los comandos personalizados
   de `.claude/commands/` funcionan.
 - **`/compact`**: el agente resume la conversación, el chat arranca sesión

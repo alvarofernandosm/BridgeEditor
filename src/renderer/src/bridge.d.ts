@@ -48,7 +48,18 @@ declare global {
       chatModels(agent: 'claude' | 'opencode' | 'antigravity'): Promise<string[]>
       chatCancel(id: string): void
       chatPermission(requestId: string, decision: 'once' | 'all' | 'reject'): void
-      chatSessions(cwd: string): Promise<Array<{ id: string; mtimeMs: number; summary: string }>>
+      chatSessions(
+        agent: 'claude' | 'opencode' | 'antigravity',
+        cwd: string
+      ): Promise<Array<{ id: string; mtimeMs: number; summary: string; when?: string }>>
+      chatTranscript(
+        agent: 'claude' | 'opencode' | 'antigravity',
+        cwd: string,
+        sessionId: string
+      ): Promise<{
+        messages: Array<{ role: 'user' | 'assistant' | 'tool'; text: string; name?: string }>
+        total: number
+      }>
       onChatEvent(id: string, cb: (ev: ChatEvent) => void): () => void
       syncCells(cells: unknown[]): void
       delegateFromCell(opts: {

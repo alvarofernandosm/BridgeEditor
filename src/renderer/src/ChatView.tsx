@@ -63,6 +63,8 @@ interface SessionInfo {
   id: string
   mtimeMs: number
   summary: string
+  /** Fecha ya formateada por el CLI del agente (opencode); claude usa mtimeMs. */
+  when?: string
 }
 
 const HELP_TEXT =
@@ -372,6 +374,29 @@ export function ChatView({
 
   const addMeta = (text: string): void => setMessages((ms) => [...ms, { role: 'meta', text }])
 
+  // Pinta el historial guardado de una sesión de Claude. Sin esto, retomar una
+  // conversación dejaba el chat en blanco y no había forma de reconocerla.
+  const showTranscript = (id: string, head: string): void => {
+    setMessages([{ role: 'meta', text: `${head} · cargando historial…` }])
+    window.bridge
+      .chatTranscript(agent, cwd, id)
+      .then(({ messages: history, total }) => {
+        // `total` cuenta el diálogo; los chips de herramienta no entran.
+        const shown = history.filter((m) => m.role !== 'tool').length
+        const header =
+          shown === 0
+            ? `${head} (sin historial guardado)`
+            : shown < total
+              ? `${head} · últimos ${shown} de ${total} mensajes`
+              : head
+        setMessages([
+          { role: 'meta', text: header },
+          ...history.map((m) => ({ role: m.role, text: m.text, name: m.name }) as ChatMsg)
+        ])
+      })
+      .catch(() => setMessages([{ role: 'meta', text: head }]))
+  }
+
   const pickSession = (s: SessionInfo): void => {
     sessionRef.current = s.id
     onSessionId(s.id)
@@ -379,8 +404,19 @@ export function ChatView({
     const saved = loadCtx(s.id)
     setCtx(saved)
     ctxRef.current = saved
-    setMessages([{ role: 'meta', text: `sesión retomada: ${s.summary || s.id.slice(0, 8)}` }])
+    showTranscript(s.id, `sesión retomada: ${s.summary || s.id.slice(0, 8)}`)
   }
+
+  // Al restaurar el layout la celda vuelve con su sesión: mostrar de qué venía.
+  // 'continue' es el marcador legado de opencode (antes de rastrear el id real)
+  // y no identifica ninguna sesión exportable.
+  useEffect(() => {
+    if (!sessionId || sessionId === 'continue') return
+    if (agent === 'claude' || agent === 'opencode') {
+      showTranscript(sessionId, 'continuando la sesión anterior')
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const resetConversation = (): void => {
     sessionRef.current = null
@@ -414,11 +450,11 @@ export function ChatView({
       return true
     }
     if (cmd === '/resume' || cmd === '/continue') {
-      if (agent !== 'claude') {
-        addMeta('solo disponible en chats de Claude Code')
+      if (agent !== 'claude' && agent !== 'opencode') {
+        addMeta('solo disponible en chats de Claude Code y OpenCode')
         return true
       }
-      window.bridge.chatSessions(cwd).then((list) => {
+      window.bridge.chatSessions(agent, cwd).then((list) => {
         if (list.length === 0) addMeta('no hay sesiones guardadas para este directorio')
         else if (cmd === '/continue') pickSession(list[0])
         else setSessions(list)
@@ -739,12 +775,13 @@ export function ChatView({
               <li key={s.id} onClick={() => pickSession(s)}>
                 <span className="chat-session-summary">{s.summary || s.id.slice(0, 8)}</span>
                 <span className="chat-session-date">
-                  {new Date(s.mtimeMs).toLocaleString('es-CO', {
-                    day: '2-digit',
-                    month: 'short',
-                    hour: '2-digit',
-                    minute: '2-digit'
-                  })}
+                  {s.when ??
+                    new Date(s.mtimeMs).toLocaleString('es-CO', {
+                      day: '2-digit',
+                      month: 'short',
+                      hour: '2-digit',
+                      minute: '2-digit'
+                    })}
                 </span>
               </li>
             ))}
@@ -820,7 +857,7 @@ export function ChatView({
                 </select>
               </label>
             )}
-            {agent === 'claude' && (
+            {(agent === 'claude' || agent === 'opencode') && (
               <button
                 className="chat-opt-action"
                 onClick={() => {
