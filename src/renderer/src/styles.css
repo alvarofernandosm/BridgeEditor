@@ -647,6 +647,55 @@ body {
   font-size: 11px;
 }
 
+/* Ocupación del contexto: vive en la barra de estado, a la derecha, para no
+   competir con el mensaje que se está escribiendo. */
+.chat-ctx {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
+  cursor: default;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-ctx b {
+  font-weight: 600;
+}
+
+.chat-ctx-bar {
+  display: block;
+  width: 76px;
+  height: 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.09);
+  overflow: hidden;
+}
+
+.chat-ctx-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: #3fb950;
+  transition: width 0.3s ease;
+}
+
+.chat-ctx.is-warn {
+  color: #d29922;
+}
+
+.chat-ctx.is-warn .chat-ctx-bar > span {
+  background: #d29922;
+}
+
+.chat-ctx.is-hot {
+  color: #f85149;
+}
+
+.chat-ctx.is-hot .chat-ctx-bar > span {
+  background: #f85149;
+}
+
 .chat-permission {
   align-self: stretch;
   display: flex;

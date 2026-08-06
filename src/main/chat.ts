@@ -226,12 +226,98 @@ function opencodeEnv(cellId: string, mode: ChatSendOpts['permissionMode']): Reco
 
 const fmtTokens = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))
 
+// ── Ocupación de la ventana de contexto ──────────────────────────────────────
+// El meta del turno (↑in ↓out) suma los cache reads de TODAS las llamadas del
+// turno: puede dar cientos de millones y no dice cuánto contexto queda libre.
+// Lo que sí lo dice es el usage de la ÚLTIMA llamada al modelo: ese total es el
+// prompt que verá la siguiente. Se emite como evento `usage` con el tamaño de
+// la ventana cuando se conoce; sin dato no se inventa (la UI muestra los tokens
+// sin denominador).
+
+// Ventanas por modelo, aprendidas del propio CLI (claude las publica en el
+// evento `result`). Se persisten en userData: si sólo vivieran en memoria, el
+// primer turno tras cada arranque mostraría los tokens sin denominador.
+let contextWindows: Map<string, number> | null = null
+
+const contextWindowsPath = (): string => join(app.getPath('userData'), 'context-windows.json')
+
+function windowsByModel(): Map<string, number> {
+  if (contextWindows) return contextWindows
+  try {
+    const raw = JSON.parse(readFileSync(contextWindowsPath(), 'utf8')) as Record<string, unknown>
+    contextWindows = new Map(
+      Object.entries(raw).filter((e): e is [string, number] => typeof e[1] === 'number')
+    )
+  } catch {
+    contextWindows = new Map()
+  }
+  return contextWindows
+}
+
+function learnContextWindow(model: string, size: number): void {
+  const map = windowsByModel()
+  if (map.get(model) === size) return
+  map.set(model, size)
+  try {
+    writeFileSync(contextWindowsPath(), JSON.stringify(Object.fromEntries(map)))
+  } catch {
+    // sin disco se pierde entre arranques, pero la sesión actual ya la sabe
+  }
+}
+
+function knownContextWindow(model: string | null | undefined): number | null {
+  if (!model) return null
+  const known = windowsByModel().get(model)
+  if (known) return known
+  // Antes del primer `result` sólo hay una pista fiable: el sufijo [1m] del
+  // alias de contexto largo. El resto se resuelve en cuanto termina un turno.
+  return /\[1m\]/.test(model) ? 1_000_000 : null
+}
+
+/** Catálogo de models.dev que cachea opencode: trae limit.context por modelo. */
+let opencodeLimits: Map<string, number> | null = null
+
+function opencodeCatalogPaths(): string[] {
+  const dirs: string[] = []
+  if (process.env.XDG_CACHE_HOME) dirs.push(process.env.XDG_CACHE_HOME)
+  if (process.platform === 'win32' && process.env.LOCALAPPDATA) dirs.push(process.env.LOCALAPPDATA)
+  dirs.push(join(homedir(), '.cache'))
+  return dirs.map((d) => join(d, 'opencode', 'models.json'))
+}
+
+function opencodeContextWindow(ref: string | null | undefined): number | null {
+  if (!ref) return null
+  if (!opencodeLimits) {
+    opencodeLimits = new Map()
+    for (const path of opencodeCatalogPaths()) {
+      try {
+        const catalog = JSON.parse(readFileSync(path, 'utf8')) as Record<
+          string,
+          { models?: Record<string, { limit?: { context?: number } }> }
+        >
+        for (const [provider, info] of Object.entries(catalog)) {
+          for (const [id, model] of Object.entries(info.models ?? {})) {
+            const ctx = model.limit?.context
+            if (typeof ctx === 'number' && ctx > 0) opencodeLimits.set(`${provider}/${id}`, ctx)
+          }
+        }
+        if (opencodeLimits.size > 0) break
+      } catch {
+        // sin catálogo en esta ruta: probar la siguiente
+      }
+    }
+  }
+  return opencodeLimits.get(ref) ?? null
+}
+
 /** Acumulado de un turno de opencode (eventos --format json). */
 interface OpencodeTurnState {
   session: string | null
   cost: number
   tokensIn: number
   tokensOut: number
+  /** provider/model del turno: fija el límite de contexto a mostrar. */
+  model: string | null
   sentTools: Set<string>
   /** un turno sano emite ≥1 step_finish; si falta, el stream se cortó */
   sawStepFinish: boolean
@@ -282,6 +368,13 @@ function opencodeFail(raw: unknown): OpencodeFail | null {
 function handleOpencodeEvent(ev: any, state: OpencodeTurnState, send: SendFn): void {
   if (typeof ev.sessionID === 'string') state.session = ev.sessionID
   const part = ev.part ?? {}
+  // El modelo del turno puede venir en el evento (celda sin modelo elegido:
+  // opencode usa el suyo por defecto y sólo así sabemos cuál es).
+  const provider = part.providerID ?? ev.providerID
+  const modelId = part.modelID ?? ev.modelID
+  if (typeof provider === 'string' && typeof modelId === 'string') {
+    state.model = `${provider}/${modelId}`
+  }
   if (ev.type === 'text' && typeof part.text === 'string' && part.text.trim()) {
     send({ kind: 'text', text: part.text })
   } else if (ev.type === 'reasoning' && typeof part.text === 'string' && part.text.trim()) {
@@ -328,6 +421,16 @@ function handleOpencodeEvent(ev: any, state: OpencodeTurnState, send: SendFn): v
       state.tokensIn =
         (tokens.input ?? 0) + (tokens.cache?.read ?? 0) + (tokens.cache?.write ?? 0)
       state.tokensOut += tokens.output ?? 0
+      // Contexto tras este paso: lo que entró (incluido lo cacheado) más lo
+      // generado. Es el prompt del paso siguiente.
+      const context = state.tokensIn + (tokens.output ?? 0)
+      if (context > 0) {
+        send({
+          kind: 'usage',
+          contextTokens: context,
+          contextWindow: opencodeContextWindow(state.model)
+        })
+      }
     }
   }
 }
@@ -451,10 +554,38 @@ export async function listChatModels(
 
 type SendFn = (payload: unknown) => void
 
-function handleClaudeEvent(ev: any, send: SendFn, markResult: () => void): void {
+/** Lo que hace falta recordar entre eventos de un turno de claude. */
+interface ClaudeTurnState {
+  contextTokens: number
+  model: string | null
+}
+
+/** Contexto ocupado tras esta llamada al modelo. Los mensajes de subagentes
+ * (parent_tool_use_id) corren en su propia ventana: no cuentan para la celda. */
+function reportClaudeContext(ev: any, state: ClaudeTurnState, send: SendFn): void {
+  const usage = ev.message?.usage
+  if (!usage || ev.parent_tool_use_id) return
+  const context =
+    (usage.input_tokens ?? 0) +
+    (usage.cache_creation_input_tokens ?? 0) +
+    (usage.cache_read_input_tokens ?? 0) +
+    (usage.output_tokens ?? 0)
+  if (context <= 0) return
+  state.contextTokens = context
+  if (typeof ev.message?.model === 'string') state.model = ev.message.model
+  send({ kind: 'usage', contextTokens: context, contextWindow: knownContextWindow(state.model) })
+}
+
+function handleClaudeEvent(
+  ev: any,
+  state: ClaudeTurnState,
+  send: SendFn,
+  markResult: () => void
+): void {
   if (ev.type === 'system' && ev.subtype === 'init') {
     send({ kind: 'init', sessionId: ev.session_id })
   } else if (ev.type === 'assistant' && Array.isArray(ev.message?.content)) {
+    reportClaudeContext(ev, state, send)
     for (const block of ev.message.content) {
       if (block.type === 'text' && block.text?.trim()) {
         send({ kind: 'text', text: block.text })
@@ -482,6 +613,23 @@ function handleClaudeEvent(ev: any, send: SendFn, markResult: () => void): void 
     }
   } else if (ev.type === 'result') {
     markResult()
+    // El CLI publica aquí la ventana real de cada modelo del turno (200k, 1M…):
+    // la cacheamos para el resto de la sesión y reemitimos el contexto, que en
+    // el primer turno se mostró sin denominador porque aún no se conocía.
+    const modelUsage = ev.modelUsage as Record<string, { contextWindow?: number }> | undefined
+    if (modelUsage) {
+      for (const [id, info] of Object.entries(modelUsage)) {
+        if (typeof info?.contextWindow === 'number') learnContextWindow(id, info.contextWindow)
+      }
+      if (!state.model) state.model = Object.keys(modelUsage)[0] ?? null
+    }
+    if (state.contextTokens > 0) {
+      send({
+        kind: 'usage',
+        contextTokens: state.contextTokens,
+        contextWindow: knownContextWindow(state.model)
+      })
+    }
     const parts: string[] = []
     if (ev.total_cost_usd != null) parts.push(`$${Number(ev.total_cost_usd).toFixed(4)}`)
     if (ev.duration_ms != null) parts.push(`${Math.round(ev.duration_ms / 1000)}s`)
@@ -644,11 +792,13 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
     let stderrTail = ''
     let gotResult = false
     const startTime = Date.now()
+    const claudeState: ClaudeTurnState = { contextTokens: 0, model: opts.model ?? null }
     const ocState: OpencodeTurnState = {
       session: null,
       cost: 0,
       tokensIn: 0,
       tokensOut: 0,
+      model: opts.model ?? null,
       sentTools: new Set(),
       sawStepFinish: false,
       degraded: false,
@@ -682,7 +832,7 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
           continue
         }
         try {
-          handleClaudeEvent(JSON.parse(line), send, () => {
+          handleClaudeEvent(JSON.parse(line), claudeState, send, () => {
             gotResult = true
           })
         } catch {

@@ -18,6 +18,9 @@ declare global {
     | { kind: 'chunk'; text: string }
     | { kind: 'tool'; name: string; detail: string }
     | { kind: 'permission-request'; requestId: string; dirs: string[] }
+    /** Ocupación de la ventana de contexto tras la última llamada al modelo.
+     *  contextWindow = null cuando aún no se conoce el tamaño del modelo. */
+    | { kind: 'usage'; contextTokens: number; contextWindow: number | null }
     | { kind: 'done'; sessionId: string | null; meta?: string | null; error?: string | null }
     | { kind: 'error'; message: string }
 

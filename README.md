@@ -209,6 +209,16 @@ se persiste en el perfil de la app.
   (`$0.0123 · 14s · ↑12.3k ↓456 tok`) — en Claude (stream-json) y en OpenCode
   (`--format json`, que además da markdown renderizado, chips de herramientas
   y session id real para el resume exacto por celda).
+- **Contexto usado / disponible**: sobre el compositor, a la derecha, una barra
+  fina muestra cuánto de la ventana del modelo lleva ocupado la conversación
+  (`ctx 787k / 1.00M · 79%`), en ámbar desde el 75% y en rojo desde el 90%. No
+  es el acumulado de tokens del turno (que suma los cache reads y no dice nada
+  del espacio libre): es el prompt real de la última llamada al modelo. El
+  tamaño de la ventana lo reporta el propio CLI — claude en `modelUsage`,
+  OpenCode vía el catálogo de models.dev que cachea — así que distingue 200k
+  de 1M sin adivinar; mientras no lo conozca muestra sólo los tokens. Las
+  ventanas aprendidas se guardan en `userData` y la ocupación por sesión, así
+  que ambas sobreviven reinicios de la app.
 - **Slash commands del chat**: `/resume` abre un selector visual de sesiones
   anteriores del directorio (botón ↺ también), `/continue` retoma la más
   reciente, `/new` empieza conversación nueva y `/help` muestra la ayuda.

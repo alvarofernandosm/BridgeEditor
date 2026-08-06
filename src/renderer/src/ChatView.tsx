@@ -86,6 +86,32 @@ const PERM_LABELS: Record<ChatPerm, string> = {
   full: 'sin preguntar'
 }
 
+/** Ocupación del contexto de la conversación (ver el evento 'usage'). */
+interface CtxUsage {
+  tokens: number
+  /** Tamaño de la ventana del modelo; null mientras no se conozca. */
+  window: number | null
+}
+
+// El contexto se mide por sesión del agente, no por celda: así sobrevive a
+// reinicios de la app y a mover la conversación de celda.
+const ctxKey = (sessionId: string): string => `bridge-editor.ctx.${sessionId}`
+
+function loadCtx(sessionId: string | null): CtxUsage | null {
+  if (!sessionId) return null
+  try {
+    const raw = localStorage.getItem(ctxKey(sessionId))
+    if (!raw) return null
+    const saved = JSON.parse(raw) as CtxUsage
+    return typeof saved?.tokens === 'number' ? saved : null
+  } catch {
+    return null
+  }
+}
+
+
+const fmtCtx = (n: number): string =>
+  n >= 1_000_000 ? `${(n / 1_000_000).toFixed(2)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(n)
 
 export function ChatView({
   cellId,
@@ -113,6 +139,7 @@ export function ChatView({
   const [permMode, setPermMode] = useState<ChatPerm>(initialPerm)
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null)
   const [models, setModels] = useState<string[]>([])
+  const [ctx, setCtx] = useState<CtxUsage | null>(() => loadCtx(sessionId))
   // Permisos, modelo y effort viven en un panel plegable: en una grilla de 3+
   // celdas los selectores en línea dejaban el campo de texto sin ancho.
   const [optsOpen, setOptsOpen] = useState(false)
@@ -132,6 +159,22 @@ export function ChatView({
   // como contexto al próximo mensaje del usuario en la sesión nueva.
   const compactingRef = useRef(false)
   const pendingContextRef = useRef<string | null>(null)
+  const ctxRef = useRef<CtxUsage | null>(ctx)
+
+  // Persistir la ocupación del contexto necesita el id de sesión, que en
+  // opencode sólo se conoce al cerrar el turno: por eso se guarda también ahí.
+  const rememberCtx = (usage: CtxUsage | null): void => {
+    ctxRef.current = usage
+    const id = sessionRef.current
+    if (!id) return
+    try {
+      if (usage) localStorage.setItem(ctxKey(id), JSON.stringify(usage))
+      else localStorage.removeItem(ctxKey(id))
+    } catch {
+      // sin localStorage el indicador sigue vivo en memoria
+    }
+  }
+
   useEffect(() => {
     const off = window.bridge.onChatEvent(cellId, (ev) => {
       switch (ev.kind) {
@@ -181,6 +224,17 @@ export function ChatView({
         case 'tool':
           setMessages((ms) => [...ms, { role: 'tool', name: ev.name, text: ev.detail }])
           break
+        case 'usage': {
+          // Una ventana ya conocida no se pierde porque un turno la reporte sin
+          // dato (pasa en el primer turno tras arrancar con un modelo nuevo).
+          const usage: CtxUsage = {
+            tokens: ev.contextTokens,
+            window: ev.contextWindow ?? ctxRef.current?.window ?? null
+          }
+          setCtx(usage)
+          rememberCtx(usage)
+          break
+        }
         case 'permission-request':
           setRunning(false)
           onActivity('idle')
@@ -193,6 +247,7 @@ export function ChatView({
           if (ev.sessionId) {
             sessionRef.current = ev.sessionId
             onSessionId(ev.sessionId)
+            rememberCtx(ctxRef.current)
           }
           if (ev.error) setMessages((ms) => [...ms, { role: 'error', text: ev.error! }])
           else if (ev.meta) setMessages((ms) => [...ms, { role: 'meta', text: ev.meta! }])
@@ -212,6 +267,8 @@ export function ChatView({
               })
               sessionRef.current = null
               onSessionId(null)
+              setCtx(null)
+              ctxRef.current = null
             }
           }
           if (!activeRef.current) onAttention()
@@ -282,6 +339,9 @@ export function ChatView({
     sessionRef.current = s.id
     onSessionId(s.id)
     setSessions(null)
+    const saved = loadCtx(s.id)
+    setCtx(saved)
+    ctxRef.current = saved
     setMessages([{ role: 'meta', text: `sesión retomada: ${s.summary || s.id.slice(0, 8)}` }])
   }
 
@@ -289,6 +349,8 @@ export function ChatView({
     sessionRef.current = null
     pendingContextRef.current = null
     onSessionId(null)
+    setCtx(null)
+    ctxRef.current = null
     setMessages([{ role: 'meta', text: 'conversación nueva' }])
   }
 
@@ -408,6 +470,10 @@ export function ChatView({
     }
     sendText(message)
   }
+
+  const ctxPct =
+    ctx?.window && ctx.window > 0 ? Math.min(100, Math.round((ctx.tokens / ctx.window) * 100)) : null
+  const ctxLevel = ctxPct === null ? '' : ctxPct >= 90 ? ' is-hot' : ctxPct >= 75 ? ' is-warn' : ''
 
   // Lo que el panel esconde sigue a la vista en la barra de estado: qué
   // permisos, qué modelo y qué effort está usando la celda ahora mismo.
@@ -663,6 +729,28 @@ export function ChatView({
           >
             {configSummary}
           </button>
+          {ctx && (
+            <span
+              className={`chat-ctx${ctxLevel}`}
+              title={
+                ctx.window
+                  ? `Contexto de la conversación: ${ctx.tokens.toLocaleString('es-CO')} de ` +
+                    `${ctx.window.toLocaleString('es-CO')} tokens · quedan ` +
+                    `${Math.max(0, ctx.window - ctx.tokens).toLocaleString('es-CO')} libres`
+                  : `Contexto de la conversación: ${ctx.tokens.toLocaleString('es-CO')} tokens ` +
+                    '(el tamaño de la ventana del modelo se conoce al terminar el primer turno)'
+              }
+            >
+              {ctxPct !== null && (
+                <span className="chat-ctx-bar">
+                  <span style={{ width: `${ctxPct}%` }} />
+                </span>
+              )}
+              ctx {fmtCtx(ctx.tokens)}
+              {ctx.window ? ` / ${fmtCtx(ctx.window)}` : ''}
+              {ctxPct !== null && <b> {ctxPct}%</b>}
+            </span>
+          )}
         </div>
         <div className="chat-composer">
           <button
