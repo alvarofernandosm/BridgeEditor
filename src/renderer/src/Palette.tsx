@@ -10,12 +10,19 @@ export interface PaletteCommand {
 interface PaletteProps {
   commands: PaletteCommand[]
   onClose: () => void
+  /** Texto del campo de filtro (la lista de modelos no son "comandos"). */
+  placeholder?: string
 }
 
-export function Palette({ commands, onClose }: PaletteProps): JSX.Element {
+export function Palette({
+  commands,
+  onClose,
+  placeholder = 'Escribe un comando…'
+}: PaletteProps): JSX.Element {
   const [query, setQuery] = useState('')
   const [sel, setSel] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
+  const listRef = useRef<HTMLUListElement>(null)
 
   const q = query.trim().toLowerCase()
   const filtered = q ? commands.filter((c) => c.label.toLowerCase().includes(q)) : commands
@@ -24,6 +31,12 @@ export function Palette({ commands, onClose }: PaletteProps): JSX.Element {
   useEffect(() => {
     inputRef.current?.focus()
   }, [])
+
+  // Con listas largas (los modelos de OpenCode son cientos) la selección se
+  // salía de la vista al bajar con las flechas.
+  useEffect(() => {
+    listRef.current?.children[selected]?.scrollIntoView({ block: 'nearest' })
+  }, [selected])
 
   const runCommand = (cmd?: PaletteCommand): void => {
     onClose()
@@ -41,7 +54,7 @@ export function Palette({ commands, onClose }: PaletteProps): JSX.Element {
         <input
           ref={inputRef}
           value={query}
-          placeholder="Escribe un comando…"
+          placeholder={placeholder}
           spellCheck={false}
           onChange={(e) => {
             setQuery(e.target.value)
@@ -60,7 +73,7 @@ export function Palette({ commands, onClose }: PaletteProps): JSX.Element {
             }
           }}
         />
-        <ul className="palette-list">
+        <ul className="palette-list" ref={listRef}>
           {filtered.map((c, i) => (
             <li
               key={c.id}

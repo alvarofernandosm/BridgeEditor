@@ -926,13 +926,61 @@ body {
   flex: 1;
   min-width: 0;
   max-width: 65%;
-  background: rgba(255, 255, 255, 0.05);
+  /* Opaco a propósito: en Linux, Chromium pinta la lista desplegada con el
+     fondo del <select>, y con un color translúcido las opciones quedaban gris
+     sobre gris. Las <option> también se pintan explícitamente. */
+  background: #161b22;
   border: 1px solid var(--border);
   color: var(--text);
   border-radius: 6px;
   padding: 4px 6px;
   font-size: 11.5px;
   font-family: inherit;
+}
+
+.chat-opt select option {
+  background: #161b22;
+  color: var(--text);
+}
+
+.chat-opt select option:checked {
+  background: var(--accent);
+  color: #0d1117;
+}
+
+/* Botón que abre el buscador de modelos: se ve como los <select> vecinos. */
+.chat-opt-value {
+  flex: 1;
+  min-width: 0;
+  max-width: 65%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  background: #161b22;
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 4px 6px;
+  font-size: 11.5px;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.chat-opt-value:hover {
+  border-color: var(--accent);
+}
+
+.chat-opt-value > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-opt-caret {
+  flex: none;
+  color: var(--muted);
 }
 
 .chat-opt-action {

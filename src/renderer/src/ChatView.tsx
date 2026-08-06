@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { renderMarkdown } from './highlight'
 import { CELL_MIME, pathsFromDrop, quotePaths } from './dnd'
 import { titleFromPrompt } from './titles'
+import { Palette } from './Palette'
 import type { AgentKind } from './App'
 
 interface ChatMsg {
@@ -143,6 +144,7 @@ export function ChatView({
   // Permisos, modelo y effort viven en un panel plegable: en una grilla de 3+
   // celdas los selectores en línea dejaban el campo de texto sin ancho.
   const [optsOpen, setOptsOpen] = useState(false)
+  const [modelPicker, setModelPicker] = useState(false)
 
   useEffect(() => {
     window.bridge.chatModels(agent).then(setModels)
@@ -664,6 +666,26 @@ export function ChatView({
           </ul>
         </div>
       )}
+      {modelPicker && (
+        <Palette
+          placeholder="Filtrar modelos…"
+          onClose={() => setModelPicker(false)}
+          commands={[
+            {
+              id: '__default__',
+              label: 'modelo por defecto',
+              hint: model === null ? 'actual' : 'el que use el agente',
+              run: () => onModel(null)
+            },
+            ...models.map((m) => ({
+              id: m,
+              label: m,
+              hint: m === model ? 'actual' : undefined,
+              run: () => onModel(m)
+            }))
+          ]}
+        />
+      )}
       <div className="chat-bottom" ref={bottomRef}>
         {optsOpen && (
           <div className="chat-opts">
@@ -683,17 +705,22 @@ export function ChatView({
               </label>
             )}
             {models.length > 0 && (
-              <label className="chat-opt">
+              <div className="chat-opt">
                 <span>Modelo</span>
-                <select value={model ?? ''} onChange={(e) => onModel(e.target.value || null)}>
-                  <option value="">modelo por defecto</option>
-                  {models.map((m) => (
-                    <option key={m} value={m}>
-                      {m}
-                    </option>
-                  ))}
-                </select>
-              </label>
+                {/* Buscador en vez de <select>: OpenCode expone cientos de
+                    modelos y la lista desplegada no cabía en la pantalla. */}
+                <button
+                  className="chat-opt-value"
+                  title={model ?? 'el que use el agente por defecto'}
+                  onClick={() => {
+                    setOptsOpen(false)
+                    setModelPicker(true)
+                  }}
+                >
+                  <span>{model ?? 'modelo por defecto'}</span>
+                  <span className="chat-opt-caret">⌄</span>
+                </button>
+              </div>
             )}
             {EFFORT_OPTIONS[agent].length > 0 && (
               <label className="chat-opt" title="claude --effort / opencode --variant">

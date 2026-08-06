@@ -196,8 +196,10 @@ se persiste en el perfil de la app.
   ediciones* (default) o *sin preguntar*.
 - **Selector de modelo por chat**: en OpenCode lista los modelos reales de tu
   instalación (`opencode models`); en Claude, los alias (`fable`, `opus`,
-  `sonnet`, `haiku`). Se guarda con el layout y la delegación entre celdas
-  respeta el modelo elegido de cada celda.
+  `sonnet`, `haiku`). Se elige con un **buscador filtrable** — el mismo widget
+  de la paleta de comandos, con flechas y Enter — porque OpenCode expone
+  cientos de modelos y una lista desplegable no cabía en pantalla. Se guarda
+  con el layout y la delegación entre celdas respeta el modelo de cada celda.
 - **Selector de effort por chat**: nivel de razonamiento del modelo — en
   Claude `--effort low|medium|high|xhigh|max`, en OpenCode el *variant* del
   proveedor (`--variant minimal|…|max`). También se guarda con el layout y lo
