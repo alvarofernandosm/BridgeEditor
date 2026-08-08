@@ -3,6 +3,8 @@ import { renderMarkdown } from './highlight'
 import { CELL_MIME, pathsFromDrop, quotePaths } from './dnd'
 import { titleFromPrompt } from './titles'
 import { detectAsk, type AskOption } from './ask'
+import { useFocusOnRequest } from './focus'
+import { parseDelegations } from './delegate'
 import { Palette } from './Palette'
 import type { AgentKind } from './App'
 
@@ -374,8 +376,10 @@ export function ChatView({
     return () => window.clearInterval(t)
   }, [running])
 
+  // El compositor ya no se apaga durante el turno (se puede encolar), así que
+  // la celda activa reclama el teclado esté trabajando o no.
   useEffect(() => {
-    if (active && !running) inputRef.current?.focus()
+    if (active) inputRef.current?.focus()
   }, [active, running])
 
   // El panel de opciones se cierra al tocar fuera o con Escape.
@@ -408,14 +412,7 @@ export function ChatView({
   }, [cellId])
 
   // Reclamar el teclado cuando otra celda se cierra (ver App.closeCell).
-  useEffect(() => {
-    const onFocusCell = (e: Event): void => {
-      const detail = (e as CustomEvent).detail as { cellId: string }
-      if (detail.cellId === cellId) inputRef.current?.focus()
-    }
-    window.addEventListener('bridge:focus-cell', onFocusCell)
-    return () => window.removeEventListener('bridge:focus-cell', onFocusCell)
-  }, [cellId])
+  useFocusOnRequest(cellId, () => inputRef.current?.focus())
 
   const addMeta = (text: string): void => setMessages((ms) => [...ms, { role: 'meta', text }])
 

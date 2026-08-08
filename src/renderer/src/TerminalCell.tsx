@@ -9,6 +9,7 @@ import { Launcher } from './Launcher'
 import { FileView } from './FileView'
 import { ChatView } from './ChatView'
 import { cleanTerminalTitle } from './titles'
+import { useFocusOnRequest } from './focus'
 
 export const AGENTS: Record<AgentKind, { label: string; command: string | null; color: string }> = {
   claude: { label: 'Claude Code', command: 'claude', color: '#d97757' },
@@ -206,6 +207,7 @@ export function TerminalCell({
       >
         {cell.status === 'launcher' && (
           <Launcher
+            cellId={cell.id}
             onStart={(kind, cwd, mode, perm) =>
               onUpdate(cell.id, {
                 agent: kind,
@@ -738,14 +740,7 @@ function TerminalView({
   }, [active])
 
   // Reclamar el teclado cuando otra celda se cierra (ver App.closeCell).
-  useEffect(() => {
-    const onFocusCell = (e: Event): void => {
-      const detail = (e as CustomEvent).detail as { cellId: string }
-      if (detail.cellId === cellId) termRef.current?.focus()
-    }
-    window.addEventListener('bridge:focus-cell', onFocusCell)
-    return () => window.removeEventListener('bridge:focus-cell', onFocusCell)
-  }, [cellId])
+  useFocusOnRequest(cellId, () => termRef.current?.focus())
 
   const [dragOver, setDragOver] = useState(false)
 

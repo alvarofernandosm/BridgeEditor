@@ -1,14 +1,21 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { AgentKind, PermLevel } from './App'
+import { useFocusOnRequest } from './focus'
 
 interface LauncherProps {
+  cellId: string
   onStart: (kind: AgentKind, cwd: string, mode: 'term' | 'chat', perm: PermLevel) => void
   onOpenFile: (path: string) => void
 }
 
-export function Launcher({ onStart, onOpenFile }: LauncherProps): JSX.Element {
+export function Launcher({ cellId, onStart, onOpenFile }: LauncherProps): JSX.Element {
   const [cwd, setCwd] = useState('')
   const [perm, setPerm] = useState<PermLevel>('default')
+  const cwdRef = useRef<HTMLInputElement>(null)
+
+  // Al cerrar la celda vecina el teclado viene a parar aquí: sin esto se
+  // quedaba en <body> y la celda, aun siendo la activa, no respondía.
+  useFocusOnRequest(cellId, () => cwdRef.current?.focus())
 
   useEffect(() => {
     window.bridge.homeDir().then((home) => setCwd((current) => current || home))
@@ -28,6 +35,7 @@ export function Launcher({ onStart, onOpenFile }: LauncherProps): JSX.Element {
       <h2>¿Qué corre en esta celda?</h2>
       <div className="cwd-row">
         <input
+          ref={cwdRef}
           value={cwd}
           onChange={(e) => setCwd(e.target.value)}
           placeholder="Directorio de trabajo"
