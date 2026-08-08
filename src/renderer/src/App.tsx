@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Grid } from './Grid'
 import { Palette, type PaletteCommand } from './Palette'
 import { AGENTS } from './TerminalCell'
+import { requestCellFocus } from './focus'
 
 export type AgentKind = 'claude' | 'opencode' | 'antigravity' | 'shell'
 export type PermLevel = 'default' | 'flexible' | 'yolo'
@@ -145,6 +146,8 @@ const labelOf = (c: CellState): string =>
 export default function App(): JSX.Element {
   const [cells, setCells] = useState<CellState[]>(() => loadSavedLayout() ?? [newCell()])
   const [activeId, setActiveId] = useState<string | null>(null)
+  /** Celda que tiene que reclamar el teclado en el próximo commit (ver closeCell). */
+  const [pendingFocus, setPendingFocus] = useState<string | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [home, setHome] = useState('')
   const [version, setVersion] = useState('')
@@ -260,16 +263,20 @@ export default function App(): JSX.Element {
       // el espacio y las mayúsculas no llegan a ninguna parte. Cambiar activeId
       // no basta: si la celda cerrada no era la activa, nadie se reenfoca.
       const focusId = activeId === id || activeId === null ? neighbour : activeId
-      if (focusId) {
-        requestAnimationFrame(() =>
-          window.dispatchEvent(
-            new CustomEvent('bridge:focus-cell', { detail: { cellId: focusId } })
-          )
-        )
-      }
+      // Se pide por estado, no en un requestAnimationFrame: cerrar la última
+      // celda monta una celda nueva, y el rAF podía llegar antes de que esa
+      // celda registrara su listener. El efecto de abajo corre después de los
+      // efectos de las celdas, así que el destinatario siempre existe ya.
+      if (focusId) setPendingFocus(focusId)
     },
     [cells, activeId]
   )
+
+  useEffect(() => {
+    if (!pendingFocus) return
+    requestCellFocus(pendingFocus)
+    setPendingFocus(null)
+  }, [pendingFocus])
 
   const updateCell = useCallback((id: string, patch: Partial<CellState>) => {
     setCells((cs) => cs.map((c) => (c.id === id ? { ...c, ...patch } : c)))

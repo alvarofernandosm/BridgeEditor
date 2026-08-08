@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { highlightCode, languageForPath, renderMarkdown } from './highlight'
+import { useFocusOnRequest } from './focus'
 
 const isMarkdown = (path: string): boolean => /\.(md|markdown)$/i.test(path)
 
@@ -16,8 +17,14 @@ export function FileView({ cellId, path }: FileViewProps): JSX.Element {
   const [externalChange, setExternalChange] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const rootRef = useRef<HTMLDivElement>(null)
   const dirtyRef = useRef(dirty)
   dirtyRef.current = dirty
+
+  // Al cerrar la celda vecina el teclado cae aquí. En modo edición lo recibe el
+  // editor; leyendo, el contenedor (tabIndex -1) para que el scroll con teclado
+  // funcione en vez de dejar el foco en <body>.
+  useFocusOnRequest(cellId, () => (textareaRef.current ?? rootRef.current)?.focus())
 
   const load = useCallback(async (): Promise<void> => {
     try {
@@ -106,7 +113,7 @@ export function FileView({ cellId, path }: FileViewProps): JSX.Element {
   }
 
   return (
-    <div className="file-view">
+    <div className="file-view" ref={rootRef} tabIndex={-1}>
       <div className="file-toolbar">
         <button
           className={`tab-btn ${mode === 'preview' ? 'tab-active' : ''}`}
