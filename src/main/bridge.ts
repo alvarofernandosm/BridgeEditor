@@ -7,6 +7,7 @@ import { homedir } from 'os'
 import { executeChatTurn, executeDelegatedTurn } from './chat'
 import { autoCheckpoint } from './checkpoints'
 import { setBridgeEnv, recordActivity, getActivity } from './bridge-state'
+import { bridgeClientPath } from './bridge-client'
 
 // Puente de delegación entre celdas: un servidor HTTP local (solo loopback,
 // con token) que permite a un agente listar celdas, delegarles trabajo,
@@ -514,31 +515,47 @@ function writeDelegationSkill(): void {
   // correcta, el orquestador falla en la primera llamada al puente.
   const win = process.platform === 'win32'
   const lang = win ? 'powershell' : 'bash'
+  // En POSIX no se documenta el token: lo lee el cliente del entorno. Pedirle al
+  // agente que lo escriba en el comando es justo lo que el guard de la shell
+  // rechaza — y lo dejaría en la línea de comandos, visible en la lista de
+  // procesos.
   const authNote = win
     ? 'Auth siempre: `-Headers @{Authorization="Bearer $env:BRIDGE_TOKEN"}`.'
-    : 'Auth siempre: `-H "Authorization: Bearer $BRIDGE_TOKEN"`.'
+    : ''
   const timeoutFlag = win ? '-TimeoutSec' : '--max-time'
 
-  const get = (path: string): string =>
+  // En POSIX los ejemplos van por el cliente y no por curl: el guard de la
+  // shell rechaza `$BRIDGE_API` (no puede validar una expansión), los heredocs
+  // con JSON y escribir el payload en /tmp, así que el camino con curl sólo
+  // era ejecutable en "sin preguntar". Ver bridge-client.ts.
+  const cli = `python3 ${bridgeClientPath()}`
+
+  // Qué contarle al agente sobre cómo habla con el puente.
+  const clientNote = win
+    ? 'Con `BRIDGE_API` y `BRIDGE_TOKEN` en tu entorno (la celda tuya es ' +
+      '`BRIDGE_CELL_ID`). ' + authNote
+    : 'Usa el cliente `' + cli + '`, que lee del entorno la dirección del ' +
+      'puente, el token y el id de TU celda: no los escribas en el comando ' +
+      '(tu shell rechaza las expansiones `$VAR`, y el token quedaría a la ' +
+      'vista en la lista de procesos). El campo `from` lo pone él solo.'
+
+  const get = (path: string, cmd: string): string =>
     win
       ? `Invoke-RestMethod "$env:BRIDGE_API${path}" -Headers @{Authorization="Bearer $env:BRIDGE_TOKEN"}`
-      : `curl -s "$BRIDGE_API${path}" -H "Authorization: Bearer $BRIDGE_TOKEN"`
+      : `${cli} ${cmd}`
 
   // Un turno delegado dura hasta 45 min (15 min por intento × 2 continuaciones),
   // muy por encima del tope que los agentes imponen a un comando de shell en
   // primer plano (10 min en Claude Code). Esperar bloqueado garantiza el
   // timeout: se lanza en segundo plano y se recoge por GET /result.
-  const postBg = (path: string, fields: string, bashBody: string): string =>
+  const postBg = (path: string, fields: string, _bashBody: string, cmd = ''): string =>
     win
       ? `$body = @{ ${fields} } | ConvertTo-Json\n` +
         `Start-Job { Invoke-RestMethod "$env:BRIDGE_API${path}" -Method Post -ContentType "application/json" ` +
         `-Headers @{Authorization="Bearer $env:BRIDGE_TOKEN"} -Body $using:body -TimeoutSec 3600 } | Out-Null`
-      : `curl -s -X POST "$BRIDGE_API${path}" \\\n` +
-        `  -H "Authorization: Bearer $BRIDGE_TOKEN" -H "Content-Type: application/json" \\\n` +
-        `  --max-time 3600 \\\n` +
-        `  -d "${bashBody}" >/dev/null 2>&1 &`
+      : `${cli} ${cmd} --out respuesta-celda.json &`
 
-  const post = (path: string, fields: string, bashBody: string): string =>
+  const post = (path: string, fields: string, _bashBody: string, cmd = ''): string =>
     win
       ? `$body = @{ ${fields} } | ConvertTo-Json\n` +
         `try {\n` +
@@ -548,10 +565,7 @@ function writeDelegationSkill(): void {
         `  $r = $_.Exception.Response\n` +
         `  if ($r) { (New-Object IO.StreamReader($r.GetResponseStream())).ReadToEnd() } else { $_.Exception.Message }\n` +
         `}`
-      : `curl -s -X POST "$BRIDGE_API${path}" \\\n` +
-        `  -H "Authorization: Bearer $BRIDGE_TOKEN" -H "Content-Type: application/json" \\\n` +
-        `  --max-time 3600 \\\n` +
-        `  -d "${bashBody}"`
+      : `${cli} ${cmd}`
 
   const skill = `---
 name: bridge-cells
@@ -560,9 +574,8 @@ description: Orquestar los agentes de otras celdas de BridgeEditor — listar ce
 
 # Orquestación entre celdas de BridgeEditor
 
-Estás en una celda de BridgeEditor. Con \`BRIDGE_API\` y \`BRIDGE_TOKEN\` en tu
-entorno puedes orquestar a los agentes de las otras celdas (la tuya es
-\`BRIDGE_CELL_ID\`). ${authNote}
+Estás en una celda de BridgeEditor y puedes orquestar a los agentes de las
+otras celdas. ${clientNote}
 
 Los ejemplos van en la shell de tu celda (${win ? 'PowerShell' : 'bash'}); no los
 traduzcas a otra.
@@ -570,7 +583,7 @@ traduzcas a otra.
 ## Listar celdas
 
 \`\`\`${lang}
-${get('/cells')}
+${get('/cells', 'cells')}
 \`\`\`
 
 Cada celda trae DOS identificadores — no los confundas:
@@ -592,14 +605,17 @@ el contexto de SU conversación, sin modificarla).
 
 ## Delegar o consultar
 
-Para algo corto (un ping, una pregunta puntual) puedes esperar bloqueado, con
-${timeoutFlag} 3600:
+La tarea va en un archivo de TU directorio de trabajo (créalo con tu
+herramienta de escritura): así puede ser larga y llevar comillas, llaves o
+saltos de línea sin pelearse con la shell. Para algo corto hay \`--text\`.
+Para un ping o una pregunta puntual puedes esperar bloqueado:
 
 \`\`\`${lang}
 ${post(
   '/delegate',
   `target = 2; message = "<tarea autocontenida>"; from = $env:BRIDGE_CELL_ID`,
-  `{\\"target\\": 2, \\"message\\": \\"<tarea autocontenida>\\", \\"from\\": \\"$BRIDGE_CELL_ID\\"}`
+  `{\\"target\\": 2, \\"message\\": \\"<tarea autocontenida>\\", \\"from\\": \\"$BRIDGE_CELL_ID\\"}`,
+  'delegate 2 --file tarea.txt'
 )}
 \`\`\`
 
@@ -607,20 +623,21 @@ Pero un turno delegado dura hasta 45 minutos (15 por intento, más 2
 continuaciones automáticas) y TU herramienta de shell tiene un tope propio muy
 por debajo: 10 minutos en Claude Code. En cuanto la tarea deje de ser trivial,
 esperar bloqueado GARANTIZA que tu comando muera aunque la celda destino
-termine perfecto. Lánzala en segundo plano:
+termine perfecto. Lánzala en segundo plano y deja la respuesta en un archivo:
 
 \`\`\`${lang}
 ${postBg(
   '/delegate',
   `target = 2; message = "<tarea autocontenida>"; from = $env:BRIDGE_CELL_ID`,
-  `{\\"target\\": 2, \\"message\\": \\"<tarea autocontenida>\\", \\"from\\": \\"$BRIDGE_CELL_ID\\"}`
+  `{\\"target\\": 2, \\"message\\": \\"<tarea autocontenida>\\", \\"from\\": \\"$BRIDGE_CELL_ID\\"}`,
+  'delegate 2 --file tarea.txt'
 )}
 \`\`\`
 
 y recoge la respuesta por separado:
 
 \`\`\`${lang}
-${get('/result?cell=2')}
+${get('/result?cell=2', 'result 2')}
 \`\`\`
 
 409 = aún trabajando; 200 = respuesta completa. CUIDADO con el \`.ts\`:
@@ -701,7 +718,8 @@ elijas tú.
 ${post(
   '/open-cell',
   `agent = "opencode"; model = "opencode-go/kimi-k2.6"; effort = "high"; cwd = "C:\\ruta\\proyecto"; message = "<primera tarea (opcional)>"; from = $env:BRIDGE_CELL_ID`,
-  `{\\"agent\\": \\"opencode\\", \\"model\\": \\"opencode-go/kimi-k2.6\\", \\"effort\\": \\"high\\", \\"cwd\\": \\"/ruta/proyecto\\", \\"message\\": \\"<primera tarea (opcional)>\\", \\"from\\": \\"$BRIDGE_CELL_ID\\"}`
+  `{\\"agent\\": \\"opencode\\", \\"model\\": \\"opencode-go/kimi-k2.6\\", \\"effort\\": \\"high\\", \\"cwd\\": \\"/ruta/proyecto\\", \\"message\\": \\"<primera tarea (opcional)>\\", \\"from\\": \\"$BRIDGE_CELL_ID\\"}`,
+  'open-cell opencode --model opencode-go/kimi-k2.6 --effort high --cwd /ruta/proyecto --file tarea.txt'
 )}
 \`\`\`
 
@@ -716,7 +734,7 @@ listan con \`opencode models\` / \`agy models\`; los de claude son sus alias
 ## Feed de actividad (qué ha pasado en las demás celdas)
 
 \`\`\`${lang}
-${get('/activity')}
+${get('/activity', 'activity')}
 \`\`\`
 
 Últimos eventos: archivos guardados en visores, turnos de chat y delegaciones.
