@@ -591,9 +591,11 @@ Cada celda trae DOS identificadores — no los confundas:
 - \`cell\` (número 1–6): la posición que VE EL USUARIO en la grilla. Cuando el
   usuario dice "la celda 6", es esto. Úsalo como \`target\` (sin preguntar).
   Cambia si el usuario reordena las celdas.
-- \`id\` (p. ej. \`"cell-7"\`): identificador interno estable; NO es la posición
-  (el contador nunca se reusa). Úsalo como \`target\` solo en tareas largas,
-  porque sobrevive a reordenamientos.
+- \`id\` (p. ej. \`"cell-7"\`): identificador interno; NO es la posición. Úsalo
+  como \`target\` en tareas largas: sobrevive a que el usuario reordene o cierre
+  celdas, y también a un reinicio del editor. Aun así NO lo hardcodees ni
+  supongas cuál es el tuyo — el tuyo lo pone el cliente solo, leyéndolo del
+  entorno.
 
 \`title\` (puede ser \`null\`) dice en qué anda esa celda: lo deduce el editor de
 lo que el agente publica, o lo escribió el usuario. Úsalo para elegir a quién
@@ -738,12 +740,19 @@ ${get('/activity', 'activity')}
 \`\`\`
 
 Últimos eventos: archivos guardados en visores, turnos de chat y delegaciones.
+Es el feed de la sesión ACTUAL del editor: al reiniciarse arranca vacío, así
+que no lo uses para comprobar si algo pasó antes de un reinicio — para eso está
+\`result\`.
 
 ## Marcadores @delegate (en celdas de chat)
 
-Si estás en una celda de chat, puedes proponer delegaciones escribiendo en tu
-respuesta: \`@delegate(2, "tarea para la celda 2")\` — el usuario verá un botón
+Si estás en una celda de chat, puedes proponer delegaciones escribiendo el
+marcador \`@delegate(2, "tarea para la celda 2")\` — el usuario verá un botón
 para aprobarla con un clic y el resultado te llegará como un turno nuevo.
+
+El marcador cuenta SÓLO si empieza su propia línea. Citado a mitad de una
+frase, o dentro de código, es texto: así puedes explicar o documentar el puente
+sin disparar delegaciones que nadie pidió.
 `
 
   try {
