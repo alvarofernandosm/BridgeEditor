@@ -53,9 +53,10 @@ function findCell(target: unknown): CellInfo | undefined {
   if (typeof target === 'string') {
     const byId = registry.find((c) => c.id === target)
     if (byId) return byId
-    // "6", "#6", "celda 6", "cell 6" → número visible en la UI. La forma con
-    // guion ("cell-6") es el formato del id interno: NO se interpreta como
-    // número, para que un id viejo no caiga en la celda equivocada.
+    // "6", "#6", "celda 6", "cell 6" → número visible en la UI. Los ids
+    // internos llevan sufijo aleatorio ("cell-a3f9c2b1"), así que no compiten
+    // con esto; la forma con guion se excluye igual por los ids correlativos
+    // de versiones anteriores, para que uno viejo no caiga en otra celda.
     const m = target.trim().match(/^(?:(?:celda|cell)\s+|#)?(\d+)$/i)
     if (m) return registry.find((c) => c.index === Number(m[1]))
   }
@@ -117,7 +118,7 @@ async function delegateToCell(params: {
       payload: {
         error:
           `no existe la celda "${String(params.targetRef)}". Usa el número que ve el usuario ` +
-          `(campo "cell" de GET /cells, p. ej. 6) o el id interno exacto (p. ej. "cell-7").`
+          `(campo "cell" de GET /cells, p. ej. 6) o el id interno exacto (p. ej. "cell-a3f9c2b1").`
       }
     }
   }
@@ -591,7 +592,7 @@ Cada celda trae DOS identificadores — no los confundas:
 - \`cell\` (número 1–6): la posición que VE EL USUARIO en la grilla. Cuando el
   usuario dice "la celda 6", es esto. Úsalo como \`target\` (sin preguntar).
   Cambia si el usuario reordena las celdas.
-- \`id\` (p. ej. \`"cell-7"\`): identificador interno; NO es la posición. Úsalo
+- \`id\` (p. ej. \`"cell-a3f9c2b1"\`): identificador interno; NO es la posición. Úsalo
   como \`target\` en tareas largas: sobrevive a que el usuario reordene o cierre
   celdas, y también a un reinicio del editor. Aun así NO lo hardcodees ni
   supongas cuál es el tuyo — el tuyo lo pone el cliente solo, leyéndolo del
