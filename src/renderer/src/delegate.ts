@@ -19,7 +19,13 @@ export interface ParsedDelegations {
   selfTargets: string[]
 }
 
-const DELEGATE_RE = /@delegate\(\s*([\w-]+)\s*,\s*"([^"]{3,500})"\s*\)/g
+// El marcador vale sólo al principio de su línea (se toleran sangría y viñetas).
+// Citarlo a mitad de una frase es explicarlo, no pedirlo: un agente que
+// documenta el puente —o que te da feedback sobre él— no quiere delegar nada.
+// La skill lo pide así de explícito, y el modo de fallo de exigirlo es mucho
+// más benigno: un botón que no aparece se vuelve a pedir; una delegación
+// fantasma gasta un turno entero y ensucia la conversación de otra celda.
+const DELEGATE_RE = /^[ \t]*(?:[-*>]\s*)?@delegate\(\s*([\w-]+)\s*,\s*"([^"]{3,500})"\s*\)/gm
 
 /**
  * Quita los tramos de código antes de buscar marcadores. El bloque sin cerrar

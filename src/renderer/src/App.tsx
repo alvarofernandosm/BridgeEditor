@@ -68,6 +68,12 @@ const STORAGE_KEY = 'bridge-editor.layout.v1'
 const AGENT_KINDS: AgentKind[] = ['claude', 'opencode', 'antigravity', 'shell']
 
 interface SavedCell {
+  /** Id interno de la celda. Se persiste para que sobreviva a los reinicios:
+   *  el puente lo publica como identificador estable y un agente puede guardarlo
+   *  para una tarea larga. Sin esto se reasignaba al restaurar el layout y ese
+   *  id apuntaba después a OTRA celda. Las plantillas lo ignoran (son celdas
+   *  nuevas, ver cellsFromSaved). */
+  id?: string
   agent: AgentKind | null
   mode?: 'term' | 'chat'
   perm?: PermLevel
@@ -87,8 +93,11 @@ function cellsFromSaved(saved: SavedCell[], withSessions: boolean): CellState[] 
   return saved.slice(0, MAX_CELLS).map((s) => {
     const agent = AGENT_KINDS.includes(s.agent as AgentKind) ? (s.agent as AgentKind) : null
     const file = typeof s.file === 'string' ? s.file : null
+    // El layout guardado conserva su id; una plantilla estrena celdas.
+    const savedId = withSessions && typeof s.id === 'string' && /^cell-\d+$/.test(s.id) ? s.id : null
+    if (savedId) nextId = Math.max(nextId, Number(savedId.slice(5)) + 1)
     return {
-      id: `cell-${nextId++}`,
+      id: savedId ?? `cell-${nextId++}`,
       agent,
       mode: s.mode === 'chat' && agent !== 'shell' ? 'chat' : 'term',
       perm: s.perm === 'flexible' || s.perm === 'yolo' ? s.perm : 'default',
@@ -228,6 +237,7 @@ export default function App(): JSX.Element {
 
   useEffect(() => {
     const snapshot: SavedCell[] = cells.map((c) => ({
+      id: c.id,
       agent: c.agent,
       mode: c.mode,
       perm: c.perm,
