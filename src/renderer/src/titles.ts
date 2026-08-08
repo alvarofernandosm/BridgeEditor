@@ -32,20 +32,48 @@ export function cleanTerminalTitle(raw: string, cwd: string): string | null {
 
 const MAX_PROMPT_TITLE = 60
 
+export interface TitleOptions {
+  /**
+   * El mensaje lo escribió otro agente, no el usuario. Ahí un `/comando` inicial
+   * es el andamiaje con que el orquestador lanza el trabajo (`/loop Implementa
+   * las fases…`), no una orden a la app: la tarea es lo que viene después, y es
+   * lo que describe la celda. En el compositor manda la regla contraria — quien
+   * escribe `/help` o `/new` no está titulando nada.
+   */
+  delegated?: boolean
+}
+
 /**
  * Título a partir del primer mensaje de un chat: primera oración, sin código
  * ni saltos de línea. null para los slash commands y los mensajes vacíos.
  */
-export function titleFromPrompt(message: string): string | null {
-  const flat = message
+export function titleFromPrompt(message: string, opts: TitleOptions = {}): string | null {
+  let flat = message
     .replace(/```[\s\S]*?```/g, ' ') // bloques de código
     .replace(/^\s*\[[^\]]{3,120}\]\s*/, '') // prefijos del puente ([Resultado de…])
     .replace(/\s+/g, ' ')
     .trim()
+  if (opts.delegated) flat = stripLeadingCommands(flat)
   if (!flat || flat.startsWith('/')) return null
   const text = truncate(firstRealSentence(flat), MAX_PROMPT_TITLE).replace(/[\s:;,–—-]+$/, '')
   if (!text) return null
   return text.charAt(0).toUpperCase() + text.slice(1)
+}
+
+/**
+ * Quita los comandos de control del principio de una tarea delegada. Se repite
+ * mientras siga habiendo uno (`/loop /babysit-prs`) porque el envoltorio puede
+ * ser más de una capa; el resto del mensaje se deja intacto, argumentos
+ * incluidos: ahí es donde está la tarea.
+ */
+function stripLeadingCommands(flat: string): string {
+  let rest = flat
+  while (rest.startsWith('/')) {
+    const next = rest.replace(/^\/\S*\s*/, '')
+    if (next === rest) break // comando sin nada que quitar: se corta el bucle
+    rest = next
+  }
+  return rest.trim()
 }
 
 /** Primera oración que dice algo: los saludos y acuses cortos ("Hola.", "Ok.")
