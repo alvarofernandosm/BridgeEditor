@@ -1077,6 +1077,12 @@ const blockedContinueMessage = (cause: string): string =>
 
 const stripSentinel = (s: string): string => s.split(TASK_END_SENTINEL).join('').trim()
 
+// Cada continuación va rotulada dentro del `.text`: sin esto los intentos se
+// concatenaban a secas y el orquestador leía el relleno de un turno abortado
+// como si fuera parte de la respuesta final.
+const continuationHeader = (n: number): string =>
+  `— continuación automática ${n}/${MAX_AUTO_CONTINUES} —`
+
 export async function executeDelegatedTurn(
   opts: ChatSendOpts,
   emit: SendFn
@@ -1095,16 +1101,32 @@ export async function executeDelegatedTurn(
   let sessionId = opts.sessionId
   let result: ChatTurnResult = { text: '', error: null, sessionId }
   const texts: string[] = []
+  // Cómo terminó la delegación. Sólo 'done' (cierre con el sentinel) significa
+  // trabajo terminado; los demás desenlaces se reportan al orquestador como
+  // error, porque un `ok: true` con la tarea a medias es indistinguible del
+  // éxito y lo lleva a construir sobre trabajo que no existe.
+  let completion: 'done' | 'failed' | 'rejected' | 'exhausted' = 'exhausted'
 
   for (let attempt = 0; attempt <= MAX_AUTO_CONTINUES; attempt++) {
     result = await executeTurnWithPermissions({ ...opts, message, sessionId }, cleanEmit)
-    if (result.text.trim()) texts.push(result.text)
+    if (result.text.trim()) {
+      texts.push(attempt === 0 ? result.text : `${continuationHeader(attempt)}\n${result.text}`)
+    }
     // un turno truncado (stream del proveedor caído a mitad de respuesta) se
     // reanuda igual que uno sin sentinel: la sesión quedó viva y continuable
     const truncated = result.error?.startsWith('turno truncado') ?? false
-    if (result.error && !truncated) break
-    if (result.rejectedPermission) break // el usuario rechazó: tarea finalizada
-    if (!truncated && result.text.includes(TASK_END_SENTINEL)) break // tarea completa
+    if (result.error && !truncated) {
+      completion = 'failed'
+      break
+    }
+    if (result.rejectedPermission) {
+      completion = 'rejected' // el usuario rechazó: tarea finalizada, pero incompleta
+      break
+    }
+    if (!truncated && result.text.includes(TASK_END_SENTINEL)) {
+      completion = 'done' // tarea completa
+      break
+    }
     sessionId = result.sessionId ?? sessionId
     if (attempt === MAX_AUTO_CONTINUES) break
     // ¿el turno se truncó por una herramienta bloqueada/fallida, o sólo le faltó
@@ -1129,9 +1151,22 @@ export async function executeDelegatedTurn(
     message = cause ? blockedContinueMessage(cause) : CONTINUE_MESSAGE
   }
 
+  // 'failed' ya trae su propio error del turno; los otros dos desenlaces
+  // incompletos no tenían ninguno y viajaban como éxito.
+  const incomplete =
+    completion === 'exhausted'
+      ? `tarea incompleta: el agente agotó las ${MAX_AUTO_CONTINUES} continuaciones ` +
+        `automáticas sin cerrar con ${TASK_END_SENTINEL}. El texto devuelto es trabajo ` +
+        `parcial: verifícalo antes de darlo por bueno y, si hace falta, delega el resto.`
+      : completion === 'rejected'
+        ? 'tarea incompleta: el usuario rechazó un permiso que el agente necesitaba ' +
+          'para terminar. El texto devuelto es trabajo parcial.'
+        : null
+
   return {
     ...result,
     sessionId: result.sessionId ?? sessionId,
+    error: result.error ?? incomplete,
     text: stripSentinel(texts.join('\n\n'))
   }
 }

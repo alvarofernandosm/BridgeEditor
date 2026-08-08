@@ -216,6 +216,15 @@ async function delegateToCell(params: {
         text: result.text,
         error: result.error
       })
+      // Una delegación que falla o queda a medias tiene que verse en el feed:
+      // en la celda destino el turno parece terminado como cualquier otro.
+      if (result.error) {
+        recordActivity({
+          cellId: target.id,
+          kind: 'delegation',
+          detail: `✗ ${fromLabel} → celda ${target.index}: ${result.error.replace(/\s+/g, ' ').slice(0, 150)}`
+        })
+      }
       return {
         status: result.error ? 502 : 200,
         payload: { ok: !result.error, cell: target.index, type: 'chat', text: result.text, error: result.error }
@@ -515,6 +524,20 @@ function writeDelegationSkill(): void {
       ? `Invoke-RestMethod "$env:BRIDGE_API${path}" -Headers @{Authorization="Bearer $env:BRIDGE_TOKEN"}`
       : `curl -s "$BRIDGE_API${path}" -H "Authorization: Bearer $BRIDGE_TOKEN"`
 
+  // Un turno delegado dura hasta 45 min (15 min por intento × 2 continuaciones),
+  // muy por encima del tope que los agentes imponen a un comando de shell en
+  // primer plano (10 min en Claude Code). Esperar bloqueado garantiza el
+  // timeout: se lanza en segundo plano y se recoge por GET /result.
+  const postBg = (path: string, fields: string, bashBody: string): string =>
+    win
+      ? `$body = @{ ${fields} } | ConvertTo-Json\n` +
+        `Start-Job { Invoke-RestMethod "$env:BRIDGE_API${path}" -Method Post -ContentType "application/json" ` +
+        `-Headers @{Authorization="Bearer $env:BRIDGE_TOKEN"} -Body $using:body -TimeoutSec 3600 } | Out-Null`
+      : `curl -s -X POST "$BRIDGE_API${path}" \\\n` +
+        `  -H "Authorization: Bearer $BRIDGE_TOKEN" -H "Content-Type: application/json" \\\n` +
+        `  --max-time 3600 \\\n` +
+        `  -d "${bashBody}" >/dev/null 2>&1 &`
+
   const post = (path: string, fields: string, bashBody: string): string =>
     win
       ? `$body = @{ ${fields} } | ConvertTo-Json\n` +
@@ -567,7 +590,10 @@ delegar y para no pisar a alguien que ya está en la misma tarea.
 visible en su celda) o \`consult\` (terminal de Claude: pregunta respondida con
 el contexto de SU conversación, sin modificarla).
 
-## Delegar o consultar (bloquea hasta la respuesta; usa ${timeoutFlag} generoso)
+## Delegar o consultar
+
+Para algo corto (un ping, una pregunta puntual) puedes esperar bloqueado, con
+${timeoutFlag} 3600:
 
 \`\`\`${lang}
 ${post(
@@ -577,17 +603,34 @@ ${post(
 )}
 \`\`\`
 
-Las tareas grandes toman DECENAS de minutos: nunca uses un ${timeoutFlag} menor a
-3600. Si tu petición muere esperando (timeout o red), el turno SIGUE corriendo
-en la celda destino y su resultado NO se pierde: espera, consulta GET /activity
-y recupera la respuesta terminada con:
+Pero un turno delegado dura hasta 45 minutos (15 por intento, más 2
+continuaciones automáticas) y TU herramienta de shell tiene un tope propio muy
+por debajo: 10 minutos en Claude Code. En cuanto la tarea deje de ser trivial,
+esperar bloqueado GARANTIZA que tu comando muera aunque la celda destino
+termine perfecto. Lánzala en segundo plano:
+
+\`\`\`${lang}
+${postBg(
+  '/delegate',
+  `target = 2; message = "<tarea autocontenida>"; from = $env:BRIDGE_CELL_ID`,
+  `{\\"target\\": 2, \\"message\\": \\"<tarea autocontenida>\\", \\"from\\": \\"$BRIDGE_CELL_ID\\"}`
+)}
+\`\`\`
+
+y recoge la respuesta por separado:
 
 \`\`\`${lang}
 ${get('/result?cell=2')}
 \`\`\`
 
-(409 = aún trabajando; 200 = última respuesta completa, con \`.ts\` para saber
-de cuándo es). NO repitas la delegación a ciegas: duplicarías el trabajo.${
+409 = aún trabajando; 200 = respuesta completa. CUIDADO con el \`.ts\`:
+/result guarda la ÚLTIMA respuesta de esa celda, así que si sondeas antes de
+que el puente registre tu delegación te llevas la ANTERIOR y creerás que ya
+terminó. Espera unos segundos antes del primer sondeo y descarta cualquier
+\`.ts\` previo a tu envío.
+
+El turno SIGUE corriendo aunque tu petición muera: NO repitas la delegación a
+ciegas — duplicarías el trabajo. Para ver el avance usa GET /activity.${
   win
     ? '\n\nEse GET también lanza excepción si no es 200: envuélvelo en el mismo\n' +
       'try/catch de arriba para leer el motivo. Y NO cambies a `curl.exe` para\n' +
@@ -601,13 +644,19 @@ de cuándo es). NO repitas la delegación a ciegas: duplicarías el trabajo.${
 dice "delega a la celda 6", el target es \`6\` — no necesitas confirmar.
 
 La respuesta trae \`.text\`. Errores: \`403\` usuario denegó, \`409\` ocupada o no
-acepta delegación, \`404\` celda inexistente. Puedes delegar a varias celdas en
-paralelo (${win ? 'Start-Job' : 'curl en background'}) y recoger resultados.
+acepta delegación, \`404\` celda inexistente, \`502\` el turno falló o quedó
+incompleto (lee \`.error\`). Puedes delegar a varias celdas en paralelo
+(${win ? 'Start-Job' : 'curl en background'}) y recoger resultados.
 
 El puente le exige al agente delegado cerrar con un marcador de completitud
 (\`<task_end>\`, oculto para el usuario) y reanuda automáticamente los turnos
-que terminan sin él (hasta 2 continuaciones): \`.text\` corresponde al trabajo
-terminado y las continuaciones quedan registradas en el feed de actividad.
+que terminan sin él (hasta 2 continuaciones, rotuladas dentro del \`.text\`).
+Sólo ese cierre significa trabajo terminado: si el agente agota las
+continuaciones sin darlo, o si el usuario le negó un permiso que necesitaba,
+la respuesta llega con \`502\` y un \`.error\` que empieza por "tarea
+incompleta". En ese caso el \`.text\` es trabajo PARCIAL — verifícalo y delega
+el resto en vez de darlo por bueno. Las continuaciones quedan registradas en
+el feed de actividad.
 
 Si la celda destino trabaja en un directorio NO relacionado con el tuyo
 (otro proyecto), el usuario verá un diálogo de advertencia. Prefiere celdas
