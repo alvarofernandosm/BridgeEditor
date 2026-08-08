@@ -231,6 +231,7 @@ export function TerminalCell({
           cell.agent !== 'shell' && (
             <ChatView
               cellId={cell.id}
+              cellIndex={index + 1}
               agent={cell.agent}
               cwd={cell.cwd}
               active={active}
