@@ -38,8 +38,6 @@ interface ChatMsg {
   live?: boolean
 }
 
-/** @delegate(2, "tarea") emitido por el agente en su respuesta. */
-const DELEGATE_RE = /@delegate\(\s*([\w-]+)\s*,\s*"([^"]{3,500})"\s*\)/g
 /** Mensaje escrito mientras el agente trabajaba: espera turno para salir. */
 interface QueuedMsg {
   id: string
@@ -51,10 +49,13 @@ interface QueuedMsg {
  *  llegan con la etiqueta de la celda origen. Ver `from` en src/main/chat.ts. */
 const BRIDGE_SENDER = 'BridgeEditor'
 
+
 type ChatPerm = 'plan' | 'edits' | 'flexible' | 'full'
 
 interface ChatViewProps {
   cellId: string
+  /** Número de celda que ve el usuario: es el que usan los marcadores @delegate. */
+  cellIndex: number
   agent: Exclude<AgentKind, 'shell'>
   cwd: string
   active: boolean
@@ -154,6 +155,7 @@ const fmtCtx = (n: number): string =>
 
 export function ChatView({
   cellId,
+  cellIndex,
   agent,
   cwd,
   active,
@@ -201,6 +203,10 @@ export function ChatView({
   activeRef.current = active
   const titledRef = useRef(titled)
   titledRef.current = titled
+  // El número de celda cambia al cerrar o reordenar vecinas, y el listener de
+  // eventos se registra una sola vez: por ref para que lea el de ahora.
+  const cellIndexRef = useRef(cellIndex)
+  cellIndexRef.current = cellIndex
   // /compact: true mientras esperamos el resumen; el resumen listo se adjunta
   // como contexto al próximo mensaje del usuario en la sesión nueva.
   const compactingRef = useRef(false)
@@ -259,10 +265,20 @@ export function ChatView({
           setMessages((ms) => {
             const next: ChatMsg[] = [...ms, { role: 'assistant', text: ev.text }]
             // marcadores @delegate del agente → tarjetas de propuesta
-            DELEGATE_RE.lastIndex = 0
-            let m: RegExpExecArray | null
-            while ((m = DELEGATE_RE.exec(ev.text))) {
-              next.push({ role: 'proposal', target: m[1], text: m[2], state: 'pending' })
+            const { proposals, selfTargets } = parseDelegations(ev.text, {
+              index: cellIndexRef.current,
+              cellId
+            })
+            for (const p of proposals) {
+              next.push({ role: 'proposal', target: p.target, text: p.task, state: 'pending' })
+            }
+            // Decirlo en vez de tragárselo: si el agente se equivocó de número,
+            // el silencio deja la delegación perdida sin que nadie se entere.
+            for (const t of selfTargets) {
+              next.push({
+                role: 'meta',
+                text: `marcador @delegate(${t}, …) ignorado: esa celda es esta misma`
+              })
             }
             return next
           })
