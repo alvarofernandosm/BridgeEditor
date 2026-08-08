@@ -1,6 +1,7 @@
 import { app } from 'electron'
 import { writeFileSync } from 'fs'
 import { join } from 'path'
+import { bridgeClientPath } from './bridge-client'
 
 export type PermLevel = 'default' | 'flexible' | 'yolo'
 
@@ -47,7 +48,7 @@ const CLAUDE_FLEXIBLE = {
       'Bash(cargo build:*)',
       'Bash(cargo test:*)',
       'Bash(go build:*)',
-      'Bash(go test:*)'
+      'Bash(go test:*)',
     ]
   }
 }
@@ -82,8 +83,18 @@ let cachedPath: string | null = null
 export function claudeFlexibleSettingsPath(): string {
   if (!cachedPath) {
     cachedPath = join(app.getPath('userData'), 'claude-permisos-flexibles.json')
+    // El puente de BridgeEditor: se autoriza el cliente concreto, no `curl`
+    // entero — abrir curl daría salida a cualquier URL, que es justo el vector
+    // que este preset evita. Se resuelve aquí (y no en la constante) para no
+    // escribir el archivo del cliente al importar el módulo.
+    const preset = {
+      permissions: {
+        ...CLAUDE_FLEXIBLE.permissions,
+        allow: [...CLAUDE_FLEXIBLE.permissions.allow, `Bash(python3 ${bridgeClientPath()}:*)`]
+      }
+    }
     // se reescribe en cada arranque para que las actualizaciones del preset apliquen
-    writeFileSync(cachedPath, JSON.stringify(CLAUDE_FLEXIBLE, null, 2))
+    writeFileSync(cachedPath, JSON.stringify(preset, null, 2))
   }
   return cachedPath
 }
