@@ -43,9 +43,15 @@ export interface CellState {
 
 export const MAX_CELLS = 6
 
-let nextId = 1
+// Id de celda: aleatorio, no correlativo. Un contador vive en memoria del
+// renderer y se reinicia con la app, así que los ids se repartían de nuevo en
+// cada arranque y un id guardado por un agente terminaba apuntando a otra
+// celda. Aleatorio y persistido, el id identifica a ESA celda y a ninguna otra;
+// y como nunca es sólo dígitos, tampoco se confunde con la posición visible.
+const newId = (): string => `cell-${crypto.randomUUID().slice(0, 8)}`
+
 const newCell = (): CellState => ({
-  id: `cell-${nextId++}`,
+  id: newId(),
   agent: null,
   mode: 'term',
   perm: 'default',
@@ -93,11 +99,11 @@ function cellsFromSaved(saved: SavedCell[], withSessions: boolean): CellState[] 
   return saved.slice(0, MAX_CELLS).map((s) => {
     const agent = AGENT_KINDS.includes(s.agent as AgentKind) ? (s.agent as AgentKind) : null
     const file = typeof s.file === 'string' ? s.file : null
-    // El layout guardado conserva su id; una plantilla estrena celdas.
-    const savedId = withSessions && typeof s.id === 'string' && /^cell-\d+$/.test(s.id) ? s.id : null
-    if (savedId) nextId = Math.max(nextId, Number(savedId.slice(5)) + 1)
+    // El layout guardado conserva su id; una plantilla estrena celdas. Se
+    // aceptan también los ids correlativos de versiones anteriores.
+    const savedId = withSessions && typeof s.id === 'string' && /^cell-[\w-]+$/.test(s.id) ? s.id : null
     return {
-      id: savedId ?? `cell-${nextId++}`,
+      id: savedId ?? newId(),
       agent,
       mode: s.mode === 'chat' && agent !== 'shell' ? 'chat' : 'term',
       perm: s.perm === 'flexible' || s.perm === 'yolo' ? s.perm : 'default',
