@@ -44,6 +44,11 @@ interface QueuedMsg {
   text: string
 }
 
+/** Remitente de los `remote-user` que emite el puente por su cuenta (las
+ *  continuaciones automáticas de un turno delegado). Las delegaciones reales
+ *  llegan con la etiqueta de la celda origen. Ver `from` en src/main/chat.ts. */
+const BRIDGE_SENDER = 'BridgeEditor'
+
 type ChatPerm = 'plan' | 'edits' | 'flexible' | 'full'
 
 interface ChatViewProps {
@@ -232,9 +237,12 @@ export function ChatView({
         case 'remote-user': {
           setMessages((ms) => [...ms, { role: 'remote-user', text: ev.text, name: ev.from }])
           // Celda que recibe una delegación sin título propio: la tarea
-          // delegada es lo que mejor la describe.
-          if (!titledRef.current) {
-            const t = titleFromPrompt(ev.text)
+          // delegada es lo que mejor la describe. Los avisos que el propio
+          // puente manda por este canal (las continuaciones automáticas) no son
+          // la tarea: sin filtrarlos, una celda que aún no tiene título acaba
+          // titulada "⟳ Continuación automática 1/2: el turno anterior…".
+          if (!titledRef.current && ev.from !== BRIDGE_SENDER) {
+            const t = titleFromPrompt(ev.text, { delegated: true })
             if (t) onAutoTitle(t)
           }
           break
