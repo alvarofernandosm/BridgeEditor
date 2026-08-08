@@ -32,10 +32,17 @@ interface ChatMsg {
   dirs?: string[]
   /** Para 'permission': decisión tomada (undefined = aún pendiente). */
   decision?: 'once' | 'all' | 'reject'
+  /** Para 'user': entregado al turno que ya estaba corriendo, no como turno propio. */
+  live?: boolean
 }
 
 /** @delegate(2, "tarea") emitido por el agente en su respuesta. */
 const DELEGATE_RE = /@delegate\(\s*([\w-]+)\s*,\s*"([^"]{3,500})"\s*\)/g
+/** Mensaje escrito mientras el agente trabajaba: espera turno para salir. */
+interface QueuedMsg {
+  id: string
+  text: string
+}
 
 type ChatPerm = 'plan' | 'edits' | 'flexible' | 'full'
 
@@ -160,6 +167,12 @@ export function ChatView({
   )
   const [input, setInput] = useState('')
   const [running, setRunning] = useState(false)
+  // Mensajes escritos durante un turno: salen solos en cuanto la celda queda
+  // libre (evento 'idle'), en el orden en que se escribieron.
+  const [queued, setQueued] = useState<QueuedMsg[]>([])
+  // Un turno que falló de verdad frena la cola: encadenar mensajes sobre una
+  // sesión rota repite el mismo fallo tantas veces como haya en cola.
+  const [queueHeld, setQueueHeld] = useState(false)
   const [elapsed, setElapsed] = useState(0)
   const [permMode, setPermMode] = useState<ChatPerm>(initialPerm)
   const [sessions, setSessions] = useState<SessionInfo[] | null>(null)
@@ -186,6 +199,14 @@ export function ChatView({
   const compactingRef = useRef(false)
   const pendingContextRef = useRef<string | null>(null)
   const ctxRef = useRef<CtxUsage | null>(ctx)
+  // running en forma de ref: el guard de sendText tiene que leer el valor de
+  // este instante, no el del render (la cola despacha dentro del mismo tick en
+  // que el turno terminó).
+  const runningRef = useRef(false)
+  // Error del último 'done'. La cola se frena por cómo QUEDÓ el turno, no por
+  // un tropiezo intermedio: un truncado reintentable emite su error y después
+  // el propio main reanuda y termina bien.
+  const lastErrorRef = useRef<string | null>(null)
 
   // Persistir la ocupación del contexto necesita el id de sesión, que en
   // opencode sólo se conoce al cerrar el turno: por eso se guarda también ahí.
@@ -219,6 +240,8 @@ export function ChatView({
           break
         }
         case 'turn-start':
+          runningRef.current = true
+          lastErrorRef.current = null
           setRunning(true)
           onActivity('working')
           break
@@ -262,14 +285,17 @@ export function ChatView({
           break
         }
         case 'permission-request':
-          setRunning(false)
+          // El turno NO terminó (el main espera la decisión), pero la celda no
+          // está avanzando: para el resto de la app cuenta como parada.
           onActivity('idle')
           setMessages((ms) => [...ms, { role: 'permission', text: '', requestId: ev.requestId, dirs: ev.dirs }])
           if (!activeRef.current) onAttention()
           break
         case 'done':
-          setRunning(false)
-          onActivity('idle')
+          // 'done' cierra un turno de proceso, no la actividad de la celda: tras
+          // autorizar un permiso o en una continuación automática vienen más.
+          // Quien para el reloj es 'idle'.
+          lastErrorRef.current = ev.error ?? null
           if (ev.sessionId) {
             sessionRef.current = ev.sessionId
             onSessionId(ev.sessionId)
@@ -302,8 +328,19 @@ export function ChatView({
           }
           if (!activeRef.current) onAttention()
           break
-        case 'error':
+        case 'idle':
+          // Fin real del turno: aquí para el reloj y se destraba la cola —
+          // salvo que el turno haya terminado mal, y entonces se frena.
+          runningRef.current = false
           setRunning(false)
+          if (lastErrorRef.current) setQueueHeld(true)
+          onActivity('idle')
+          break
+        case 'error':
+          runningRef.current = false
+          lastErrorRef.current = ev.message
+          setRunning(false)
+          setQueueHeld(true)
           onActivity('idle')
           setMessages((ms) => [...ms, { role: 'error', text: ev.message }])
           if (!activeRef.current) onAttention()
@@ -374,6 +411,31 @@ export function ChatView({
 
   const addMeta = (text: string): void => setMessages((ms) => [...ms, { role: 'meta', text }])
 
+  const enqueue = (text: string): void =>
+    setQueued((q) => [...q, { id: crypto.randomUUID(), text }])
+
+  /**
+   * Mensaje escrito con la celda ocupada. Se intenta la entrega en vivo (claude
+   * lee stdin mientras trabaja y el modelo lo atiende en su siguiente paso, sin
+   * esperar el cierre del turno); si el agente no la admite, espera en la cola.
+   * Entra a la cola desde ya para que se vea de inmediato, y sale de ella si la
+   * entrega prospera.
+   */
+  const deliverNow = (text: string): void => {
+    const item = { id: crypto.randomUUID(), text }
+    setQueued((q) => [...q, item])
+    window.bridge
+      .chatPush(cellId, text)
+      .then((delivered) => {
+        if (!delivered) return
+        setQueued((q) => q.filter((m) => m.id !== item.id))
+        setMessages((ms) => [...ms, { role: 'user', text, live: true }])
+      })
+      .catch(() => {
+        // sin canal en vivo se queda en la cola, que es el camino normal
+      })
+  }
+
   // Pinta el historial guardado de una sesión de Claude. Sin esto, retomar una
   // conversación dejaba el chat en blanco y no había forma de reconocerla.
   const showTranscript = (id: string, head: string): void => {
@@ -421,6 +483,10 @@ export function ChatView({
   const resetConversation = (): void => {
     sessionRef.current = null
     pendingContextRef.current = null
+    // Empezar de cero incluye lo que estaba esperando turno: esos mensajes se
+    // escribieron para la conversación que se acaba de tirar.
+    setQueued([])
+    setQueueHeld(false)
     onSessionId(null)
     setCtx(null)
     ctxRef.current = null
@@ -480,9 +546,11 @@ export function ChatView({
       setMessages((ms) => [...ms, { role: 'error', text: `delegación falló: ${res.error}` }])
       return
     }
-    sendText(
-      `[Resultado de la delegación a la celda ${res.cell}]\n\n${res.text || '(sin texto)'}`
-    )
+    const report = `[Resultado de la delegación a la celda ${res.cell}]\n\n${res.text || '(sin texto)'}`
+    // Delegar tarda, y en ese rato el usuario pudo arrancar otro turno: el
+    // resultado entra a la cola en vez de perderse (sendText lo descartaría).
+    if (runningRef.current) enqueue(report)
+    else sendText(report)
   }
 
   // Responder al diálogo de permiso de acceso externo: avisa al main y marca la
@@ -494,14 +562,14 @@ export function ChatView({
     )
   }
 
-  // Hay un permiso esperando decisión: bloquea el compositor para no arrancar
-  // otro turno mientras el main espera la respuesta.
+  // Hay un permiso esperando decisión: el main está detenido esperándola, así
+  // que no se puede arrancar otro turno (escribir sí: se encola).
   const awaitingPerm = messages.some((m) => m.role === 'permission' && !m.decision)
 
   // display: lo que se muestra como burbuja del usuario (null = nada, p. ej.
   // el prompt interno de /compact); message: lo que viaja al agente.
   const sendText = (message: string, display: string | null = message): void => {
-    if (!message || running) return
+    if (!message || runningRef.current) return
     // Primer mensaje de la conversación (también tras /new o /compact): es el
     // que define de qué va la celda. Se usa `display` porque `message` puede
     // llevar adjuntos internos (el resumen compactado, prompts del puente).
@@ -510,6 +578,7 @@ export function ChatView({
       if (t) onAutoTitle(t)
     }
     if (display !== null) setMessages((ms) => [...ms, { role: 'user', text: display }])
+    runningRef.current = true
     setRunning(true)
     onActivity('working')
     window.bridge
@@ -523,8 +592,26 @@ export function ChatView({
         model,
         effort
       })
-      .catch((e) => {
+      .then((res) => {
+        // La celda ya estaba ocupada (una delegación entrante se metió primero):
+        // el main no lanzó nada, así que el mensaje se deshace y vuelve a la cola
+        // en vez de perderse. Sin esto la burbuja quedaría en pantalla como si
+        // se hubiera enviado.
+        if (!res?.busy) return
+        runningRef.current = false
         setRunning(false)
+        if (display !== null) {
+          setMessages((ms) => {
+            const last = ms[ms.length - 1]
+            return last?.role === 'user' && last.text === display ? ms.slice(0, -1) : ms
+          })
+        }
+        setQueued((q) => [{ id: crypto.randomUUID(), text: message }, ...q])
+      })
+      .catch((e) => {
+        runningRef.current = false
+        setRunning(false)
+        setQueueHeld(true)
         onActivity('idle')
         setMessages((ms) => [...ms, { role: 'error', text: String(e) }])
       })
@@ -549,10 +636,11 @@ export function ChatView({
     inputRef.current?.focus()
   }
 
-  const send = (): void => {
-    const message = input.trim()
-    if (!message || running) return
-    setInput('')
+  // Camino de un mensaje del usuario con la celda libre. La cola pasa por aquí
+  // también: un '/new' encolado tiene que ejecutarse como comando, no viajar
+  // literal al agente, y el resumen de /compact tiene que engancharse al primer
+  // mensaje de la sesión nueva aunque ese mensaje venga de la cola.
+  const submit = (message: string): void => {
     if (message.startsWith('/') && handleSlash(message)) return
     if (pendingContextRef.current) {
       const wire = `[Resumen de la conversación anterior, compactada]\n${pendingContextRef.current}\n\n---\n\n${message}`
@@ -561,6 +649,67 @@ export function ChatView({
       return
     }
     sendText(message)
+  }
+
+  // La celda no puede arrancar un turno ahora: o hay uno corriendo, o el main
+  // está esperando que el usuario resuelva un permiso.
+  const busy = running || awaitingPerm
+
+  // La cola sale sola en cuanto la celda queda libre. Va por efecto y no dentro
+  // del evento 'idle' a propósito: así también arranca cuando lo que destraba
+  // es otra cosa (se resolvió el permiso, se reanudó la cola tras un error, o
+  // el mensaje rebotó porque una delegación se había metido primero).
+  useEffect(() => {
+    if (busy || queueHeld || queued.length === 0) return
+    const [next, ...rest] = queued
+    setQueued(rest)
+    // El turno terminó preguntando y ya había algo escrito: ese mensaje es la
+    // respuesta, así que la tarjeta de opciones se retira (igual que en el CLI).
+    setMessages((ms) =>
+      ms.map((m) => (m.role === 'ask' && m.state === 'pending' ? { ...m, state: 'dismissed' } : m))
+    )
+    submit(next.text)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busy, queueHeld, queued])
+
+  /** steer = no esperar: se corta el turno actual y la cola arranca enseguida. */
+  const send = (steer = false): void => {
+    const message = input.trim()
+    if (!message) return
+    setInput('')
+    // Escribir es retomar el control: si la cola estaba frenada por un error,
+    // este mensaje la reanuda.
+    setQueueHeld(false)
+    if (busy) {
+      // steer = el usuario quiere cortar lo que el agente está haciendo, no solo
+      // sumar contexto: ahí se cancela y el mensaje sale como turno nuevo.
+      if (steer) {
+        enqueue(message)
+        window.bridge.chatCancel(cellId)
+      } else {
+        deliverNow(message)
+      }
+      return
+    }
+    submit(message)
+  }
+
+  /** Manda este mensaje al frente de la cola y corta el turno en curso. */
+  const steerNow = (id: string): void => {
+    setQueued((q) => {
+      const found = q.find((m) => m.id === id)
+      return found ? [found, ...q.filter((m) => m.id !== id)] : q
+    })
+    setQueueHeld(false)
+    window.bridge.chatCancel(cellId)
+  }
+
+  const editQueued = (id: string): void => {
+    const found = queued.find((m) => m.id === id)
+    if (!found) return
+    setQueued((q) => q.filter((m) => m.id !== id))
+    setInput((current) => (current ? `${found.text}\n${current}` : found.text))
+    inputRef.current?.focus()
   }
 
   const ctxPct =
@@ -607,6 +756,7 @@ export function ChatView({
           if (m.role === 'user') {
             return (
               <div key={i} className="chat-user">
+                {m.live && <span className="chat-user-live">⚡ entregado al turno en curso</span>}
                 {m.text}
               </div>
             )
@@ -755,12 +905,41 @@ export function ChatView({
             </div>
           )
         })}
-        {running && (
+        {running && !awaitingPerm && (
           <div className="chat-working">
             <span className="chat-spinner" /> trabajando… {elapsed}s
             <button onClick={() => window.bridge.chatCancel(cellId)}>■ Cancelar</button>
           </div>
         )}
+        {queued.map((q, n) => (
+          <div key={q.id} className="chat-queued">
+            <span className="chat-queued-head">
+              ⏳ En cola{queued.length > 1 ? ` · ${n + 1} de ${queued.length}` : ''}
+              {queueHeld && n === 0 ? ' · esperando a que retomes tras el error' : ''}
+            </span>
+            <span className="chat-queued-text">{q.text}</span>
+            <div className="chat-queued-actions">
+              {busy && (
+                <button
+                  className="chat-queued-now"
+                  title="Corta el turno actual y manda este mensaje enseguida"
+                  onClick={() => steerNow(q.id)}
+                >
+                  ⚡ Enviar ya
+                </button>
+              )}
+              {queueHeld && !busy && (
+                <button className="chat-queued-now" onClick={() => setQueueHeld(false)}>
+                  ▶ Reanudar la cola
+                </button>
+              )}
+              <button onClick={() => editQueued(q.id)}>✎ Editar</button>
+              <button onClick={() => setQueued((qs) => qs.filter((m) => m.id !== q.id))}>
+                🗑 Quitar
+              </button>
+            </div>
+          </div>
+        ))}
       </div>
       {sessions && (
         <div className="chat-sessions">
@@ -923,28 +1102,28 @@ export function ChatView({
             value={input}
             rows={2}
             placeholder={
-              awaitingPerm
-                ? 'Esperando tu autorización…'
-                : running
-                  ? 'El agente está trabajando…'
-                  : 'Escribe un mensaje (Enter envía)'
+              !busy
+                ? 'Escribe un mensaje (Enter envía)'
+                : agent === 'claude'
+                  ? 'Enter se lo pasa al turno en curso · Ctrl+Enter lo corta y envía'
+                  : 'Enter encola · Ctrl+Enter corta el turno y envía ya'
             }
-            disabled={running || awaitingPerm}
             spellCheck={false}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault()
-                send()
+                send(e.ctrlKey || e.metaKey)
               }
             }}
           />
           <button
             className="chat-send"
-            onClick={send}
-            disabled={running || awaitingPerm || !input.trim()}
+            title={busy ? 'Encolar (Ctrl+Enter para enviar ya)' : 'Enviar'}
+            onClick={() => send()}
+            disabled={!input.trim()}
           >
-            ➤
+            {busy ? '⏳' : '➤'}
           </button>
         </div>
       </div>

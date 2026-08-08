@@ -554,6 +554,15 @@ body {
   font-weight: 600;
 }
 
+/* Mensaje que entró en un turno que ya corría: no abrió turno propio. */
+.chat-user-live {
+  display: block;
+  font-size: 10.5px;
+  color: #d29922;
+  font-weight: 600;
+  margin-bottom: 3px;
+}
+
 .chat-assistant {
   align-self: stretch;
   font-size: 13px;
@@ -707,6 +716,62 @@ body {
 .chat-ask-state {
   color: var(--muted);
   font-size: 11px;
+}
+
+/* Mensaje escrito mientras el agente trabajaba: se parece a la burbuja del
+   usuario (es suyo) pero apagada y punteada, porque todavía no ha salido. */
+.chat-queued {
+  align-self: flex-end;
+  max-width: 85%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: rgba(139, 148, 158, 0.08);
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 12.5px;
+}
+
+.chat-queued-head {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.chat-queued-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  opacity: 0.85;
+}
+
+.chat-queued-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chat-queued-actions button {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 5px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.chat-queued-actions button:hover {
+  color: var(--text);
+}
+
+.chat-queued-now {
+  border-color: rgba(210, 153, 34, 0.6) !important;
+  color: #d29922 !important;
+}
+
+.chat-queued-now:hover {
+  background: rgba(210, 153, 34, 0.12);
 }
 
 /* Ocupación del contexto: vive en la barra de estado, a la derecha, para no
