@@ -1,6 +1,6 @@
 import { app, ipcMain, powerSaveBlocker, type WebContents } from 'electron'
 import { spawn, type ChildProcess, type ChildProcessByStdio } from 'child_process'
-import type { Readable } from 'stream'
+import type { Readable, Writable } from 'stream'
 import { existsSync, readFileSync, writeFileSync } from 'fs'
 import { readdir, readFile, stat, open } from 'fs/promises'
 import { join, resolve, dirname, sep, isAbsolute } from 'path'
@@ -32,6 +32,75 @@ function syncPowerBlocker(): void {
 
 export const runningChatCount = (): number => running.size
 
+// ── Turno lógico de una celda ────────────────────────────────────────────────
+// Un solo `chat:send` puede desatar VARIOS turnos de proceso —reintento tras
+// autorizar un permiso (executeTurnWithPermissions), continuación automática de
+// una delegación (executeDelegatedTurn)— y cada uno emite su propio `done`.
+// Para la cola de mensajes hace falta un fin de verdad: `idle` se emite una
+// sola vez, cuando ya no queda nada corriendo en la celda. Arrancar un turno
+// antes de eso deja dos procesos sobre el mismo directorio, y como `running`
+// es un proceso por celda, el segundo tapa al primero y "Cancelar" ya no puede
+// matarlo.
+const turnDepth = new Map<string, number>()
+
+export const isCellBusy = (id: string): boolean => (turnDepth.get(id) ?? 0) > 0
+
+async function withTurnLock<T>(cellId: string, emit: SendFn, run: () => Promise<T>): Promise<T> {
+  turnDepth.set(cellId, (turnDepth.get(cellId) ?? 0) + 1)
+  try {
+    return await run()
+  } finally {
+    const left = (turnDepth.get(cellId) ?? 1) - 1
+    if (left > 0) turnDepth.set(cellId, left)
+    else {
+      turnDepth.delete(cellId)
+      emit({ kind: 'idle' })
+    }
+  }
+}
+
+// Celdas cuyo turno paró el usuario. Sin esta marca la cancelación llega a la
+// vista como un fallo cualquiera ("código 143"), y la cola de mensajes —que se
+// detiene ante un error— se frenaría justo cuando el usuario cancela para
+// mandar algo distinto.
+const canceledCells = new Set<string>()
+
+// ── Entrega en vivo (solo claude) ────────────────────────────────────────────
+// `claude -p --input-format stream-json` deja stdin abierto y lee mensajes de
+// usuario en JSONL mientras trabaja. Comprobado contra el CLI 2.1.226: un
+// mensaje escrito a mitad de turno NO espera a que el turno cierre — el modelo
+// lo ve en el siguiente paso de su loop y responde a él dentro del mismo turno
+// (un único `result`, con num_turns 2). Es la misma semántica que el TUI.
+//
+// opencode y antigravity no tienen equivalente: su turno es un proceso con
+// stdin cerrado, así que ahí el mensaje espera en la cola de la vista.
+type AgentStdin = 'ignore' | 'pipe'
+
+interface LiveTurn {
+  /** Entrega un mensaje al turno en curso. false = el canal ya no admite. */
+  push: (text: string) => boolean
+}
+
+const liveTurns = new Map<string, LiveTurn>()
+
+/** Línea JSONL de un mensaje de usuario para `--input-format stream-json`. */
+const userLine = (text: string): string =>
+  JSON.stringify({
+    type: 'user',
+    message: { role: 'user', content: [{ type: 'text', text }] }
+  }) + '\n'
+
+/**
+ * Le pasa un mensaje al turno que la celda tiene corriendo, sin esperar a que
+ * termine. Devuelve false si no hay canal en vivo (agente sin soporte, turno ya
+ * cerrado): ahí el mensaje se queda en la cola de la vista.
+ */
+export function pushToLiveTurn(cellId: string, text: string): boolean {
+  const live = liveTurns.get(cellId)
+  if (!live || !text.trim()) return false
+  return live.push(text)
+}
+
 const shellQuote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`
 
 export interface ChatSendOpts {
@@ -51,6 +120,9 @@ export interface ChatTurnResult {
   text: string
   error: string | null
   sessionId: string | null
+  /** El usuario paró el turno con "■ Cancelar": no es un fallo del agente y la
+   * sesión queda viva y reanudable (ver chat:cancel). */
+  canceled?: boolean
   /** Herramientas que terminaron en error este turno (p. ej. permiso rechazado
    * en headless). Señal de que el turno pudo truncarse por un fallo real, no
    * por un simple olvido del cierre <task_end>. */
@@ -146,7 +218,21 @@ function buildArgv(opts: ChatSendOpts): { file: string; args: string[] } {
     return { file: 'agy', args: flags }
   }
   if (opts.agent === 'claude') {
-    const flags = ['-p', opts.message, '--output-format', 'stream-json', '--verbose']
+    // El mensaje NO va en argv: viaja por stdin como JSONL (ver liveInput). Eso
+    // deja el canal abierto para entregarle mensajes al turno mientras trabaja,
+    // y de paso quita el límite de cmd.exe en Windows, que truncaba la línea de
+    // comandos en el primer salto de línea de un prompt multilínea.
+    const flags = [
+      '-p',
+      '--input-format',
+      'stream-json',
+      '--output-format',
+      'stream-json',
+      '--verbose',
+      // acuse de cada mensaje leído de stdin: es lo que dice cuándo se puede
+      // cerrar el canal sin perder nada (ver maybeFinish)
+      '--replay-user-messages'
+    ]
     flags.push('--append-system-prompt', HEADLESS_NOTE + ASK_CONTRACT)
     if (opts.model) flags.push('--model', opts.model)
     if (opts.effort) flags.push('--effort', opts.effort)
@@ -195,17 +281,20 @@ function resolveWindowsBinary(file: string): string | null {
  * así que un mensaje multilínea la truncaba y el agente arrancaba sin prompt —
  * turno vacío que la UI reportaba como "terminó sin resultado (código 0)".
  */
+/** stdin es Writable sólo cuando se pide 'pipe' (claude); el resto va a null. */
+type AgentChild = ChildProcessByStdio<Writable | null, Readable, Readable>
+
 function spawnAgent(
   file: string,
   args: string[],
-  options: { cwd: string; env: Record<string, string>; stdio: ['ignore', 'pipe', 'pipe'] }
-): ChildProcessByStdio<null, Readable, Readable> {
+  options: { cwd: string; env: Record<string, string>; stdio: [AgentStdin, 'pipe', 'pipe'] }
+): AgentChild {
   if (process.platform !== 'win32') {
     // -ilc (login + interactivo): garantiza el PATH del usuario aunque la app
     // se lance desde el menú de aplicaciones (nvm y similares viven en .bashrc,
     // que los shells no interactivos se saltan).
     const cmd = [file, ...args].map(shellQuote).join(' ')
-    return spawn(process.env.SHELL || '/bin/bash', ['-ilc', cmd], options)
+    return spawn(process.env.SHELL || '/bin/bash', ['-ilc', cmd], options) as AgentChild
   }
   const resolved = resolveWindowsBinary(file)
   // Los shims .cmd/.bat (instalaciones por npm) no se pueden lanzar sin shell:
@@ -213,9 +302,9 @@ function spawnAgent(
   // cmd.exe, y el quoting de cada argumento lo pone node (mejor que armarlo a
   // mano); un mensaje multilínea sigue sin poder pasar por cmd.exe.
   if (resolved && /\.(cmd|bat)$/i.test(resolved)) {
-    return spawn('cmd.exe', ['/d', '/s', '/c', resolved, ...args], options)
+    return spawn('cmd.exe', ['/d', '/s', '/c', resolved, ...args], options) as AgentChild
   }
-  return spawn(resolved ?? file, args, options)
+  return spawn(resolved ?? file, args, options) as AgentChild
 }
 
 // Permisos de opencode en el chat headless. opencode pregunta antes de tocar
@@ -800,12 +889,50 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
       BRIDGE_CELL_ID: opts.id,
       TERM: 'dumb'
     } as Record<string, string>
-    // stdio: stdin cerrado — opencode run lee stdin si está abierto (modo pipe)
-    // y se quedaría esperando EOF para siempre.
-    const stdio: ['ignore', 'pipe', 'pipe'] = ['ignore', 'pipe', 'pipe']
+    // claude habla por stdin (JSONL, ver liveInput). opencode run, en cambio,
+    // lee stdin si está abierto y se quedaría esperando EOF para siempre.
+    const streaming = opts.agent === 'claude'
+    const stdio: [AgentStdin, 'pipe', 'pipe'] = [streaming ? 'pipe' : 'ignore', 'pipe', 'pipe']
+    // una cancelación anterior ya cumplió su función: no debe teñir este turno
+    canceledCells.delete(opts.id)
     const child = spawnAgent(file, args, { cwd: opts.cwd, env, stdio })
     running.set(opts.id, child)
     syncPowerBlocker()
+
+    // Mensajes escritos a stdin y acuses recibidos (evento `user` de
+    // --replay-user-messages). El canal se cierra cuando el turno reporta
+    // `result` y ya no queda nada escrito sin leer: cerrarlo antes perdería el
+    // mensaje que el usuario acaba de mandar.
+    let written = 0
+    let acked = 0
+    let closingInput = false
+    const endInput = (): void => {
+      if (closingInput) return
+      closingInput = true
+      child.stdin?.end()
+    }
+    const maybeEndInput = (): void => {
+      if (acked >= written) endInput()
+      // Falta el acuse de algo recién escrito: el CLI lo va a leer y cerrará el
+      // turno con otro `result`. La red por si ese acuse nunca llega (CLI sin
+      // --replay-user-messages) evita dejar el proceso vivo para siempre.
+      else setTimeout(endInput, 5000)
+    }
+    if (streaming && child.stdin) {
+      written++
+      child.stdin.write(userLine(opts.message))
+      child.stdin.on('error', () => {
+        // el proceso murió con escrituras en vuelo (cancelación): nada que hacer
+      })
+      liveTurns.set(opts.id, {
+        push: (text) => {
+          if (closingInput || !child.stdin?.writable) return false
+          written++
+          child.stdin.write(userLine(text))
+          return true
+        }
+      })
+    }
 
     let buf = ''
     let stderrTail = ''
@@ -851,8 +978,20 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
           continue
         }
         try {
-          handleClaudeEvent(JSON.parse(line), claudeState, send, () => {
+          const ev = JSON.parse(line)
+          // Acuse de un mensaje nuestro. Los resultados de herramienta llegan
+          // también como `user`, pero con bloques tool_result en vez de texto.
+          if (
+            streaming &&
+            ev.type === 'user' &&
+            Array.isArray(ev.message?.content) &&
+            ev.message.content.some((b: { type?: string }) => b?.type === 'text')
+          ) {
+            acked++
+          }
+          handleClaudeEvent(ev, claudeState, send, () => {
             gotResult = true
+            if (streaming) maybeEndInput()
           })
         } catch {
           // línea que no es JSON (banners, warnings): ignorar
@@ -872,7 +1011,12 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
 
     child.on('close', async (code) => {
       running.delete(opts.id)
+      liveTurns.delete(opts.id)
       syncPowerBlocker()
+      // El usuario paró el turno: lo que el CLI reporte al morir (código 143,
+      // stream a medias) es consecuencia de eso, no un fallo que valga contar.
+      const canceled = canceledCells.has(opts.id)
+      const canceledMeta = '⏹ cancelado por ti'
       if (opts.agent === 'antigravity') {
         const full = stripAnsi(agyOut).trim()
         // conversación: la conocida, o la recién creada por este turno
@@ -883,6 +1027,22 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
         if (prev && full.startsWith(prev)) text = full.slice(prev.length).trim()
         if (convId) rememberAgyTranscript(convId, full)
         if (text) send({ kind: 'text', text })
+        if (canceled) {
+          send({
+            kind: 'done',
+            sessionId: convId,
+            meta: canceledMeta,
+            error: null,
+            canceled: true
+          })
+          resolveTurn({
+            text: collected.join('\n\n').trim(),
+            error: null,
+            sessionId: finalSession ?? convId,
+            canceled: true
+          })
+          return
+        }
         let error: string | null = code
           ? stripAnsi(stderrTail) || `agy terminó con código ${code}`
           : null
@@ -899,6 +1059,27 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
           error
         })
         resolveTurn({ text: collected.join('\n\n').trim(), error: finalError, sessionId: finalSession })
+        return
+      }
+      if (canceled) {
+        // La sesión sobrevive al SIGTERM (ambos CLI persisten paso a paso), así
+        // que el id se reporta igual: el próximo mensaje la reanuda donde quedó.
+        send({
+          kind: 'done',
+          sessionId:
+            opts.agent === 'opencode'
+              ? (ocState.session ?? opts.sessionId ?? 'continue')
+              : (finalSession ?? opts.sessionId),
+          meta: canceledMeta,
+          error: null,
+          canceled: true
+        })
+        resolveTurn({
+          text: collected.join('\n\n').trim(),
+          error: null,
+          sessionId: finalSession ?? ocState.session ?? opts.sessionId,
+          canceled: true
+        })
         return
       }
       if (opts.agent === 'opencode') {
@@ -958,6 +1139,7 @@ export function executeChatTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatT
 
     child.on('error', (err) => {
       running.delete(opts.id)
+      liveTurns.delete(opts.id)
       syncPowerBlocker()
       send({ kind: 'error', message: String(err) })
       resolveTurn({ text: '', error: String(err), sessionId: null })
@@ -1000,7 +1182,14 @@ const grantedMessage = (decision: PermDecision, dirs: string[]): string =>
  * acceso concedido (o da la tarea por finalizada si lo rechaza). Lo usan tanto
  * el chat directo como la delegación. Para claude/antigravity es un passthrough.
  */
-export async function executeTurnWithPermissions(opts: ChatSendOpts, emit: SendFn): Promise<ChatTurnResult> {
+export function executeTurnWithPermissions(
+  opts: ChatSendOpts,
+  emit: SendFn
+): Promise<ChatTurnResult> {
+  return withTurnLock(opts.id, emit, () => runTurnWithPermissions(opts, emit))
+}
+
+async function runTurnWithPermissions(opts: ChatSendOpts, emit: SendFn): Promise<ChatTurnResult> {
   let message = opts.message
   let sessionId = opts.sessionId
   let result: ChatTurnResult = { text: '', error: null, sessionId }
@@ -1009,7 +1198,7 @@ export async function executeTurnWithPermissions(opts: ChatSendOpts, emit: SendF
     result = await executeChatTurn({ ...opts, message, sessionId }, emit)
     sessionId = result.sessionId ?? sessionId
     result = { ...result, sessionId }
-    if (result.error || opts.agent !== 'opencode') break
+    if (result.error || result.canceled || opts.agent !== 'opencode') break
     if (cellGrants.get(opts.id)?.bypass) break // ya en bypass: no debió topar permiso
 
     // Directorios externos que el turno no pudo tocar. Los rechazos dentro del
@@ -1083,10 +1272,11 @@ const stripSentinel = (s: string): string => s.split(TASK_END_SENTINEL).join('')
 const continuationHeader = (n: number): string =>
   `— continuación automática ${n}/${MAX_AUTO_CONTINUES} —`
 
-export async function executeDelegatedTurn(
-  opts: ChatSendOpts,
-  emit: SendFn
-): Promise<ChatTurnResult> {
+export function executeDelegatedTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatTurnResult> {
+  return withTurnLock(opts.id, emit, () => runDelegatedTurn(opts, emit))
+}
+
+async function runDelegatedTurn(opts: ChatSendOpts, emit: SendFn): Promise<ChatTurnResult> {
   // El sentinel nunca llega a la UI: se filtra de los eventos de texto.
   const cleanEmit: SendFn = (payload) => {
     const ev = payload as { kind?: string; text?: string }
@@ -1105,10 +1295,10 @@ export async function executeDelegatedTurn(
   // trabajo terminado; los demás desenlaces se reportan al orquestador como
   // error, porque un `ok: true` con la tarea a medias es indistinguible del
   // éxito y lo lleva a construir sobre trabajo que no existe.
-  let completion: 'done' | 'failed' | 'rejected' | 'exhausted' = 'exhausted'
+  let completion: 'done' | 'failed' | 'rejected' | 'exhausted' | 'canceled' = 'exhausted'
 
   for (let attempt = 0; attempt <= MAX_AUTO_CONTINUES; attempt++) {
-    result = await executeTurnWithPermissions({ ...opts, message, sessionId }, cleanEmit)
+    result = await runTurnWithPermissions({ ...opts, message, sessionId }, cleanEmit)
     if (result.text.trim()) {
       texts.push(attempt === 0 ? result.text : `${continuationHeader(attempt)}\n${result.text}`)
     }
@@ -1123,12 +1313,23 @@ export async function executeDelegatedTurn(
       completion = 'rejected' // el usuario rechazó: tarea finalizada, pero incompleta
       break
     }
+    // El usuario paró el turno: reanudarlo automáticamente sería justo lo
+    // contrario de lo que pidió.
+    if (result.canceled) {
+      completion = 'canceled'
+      break
+    }
     if (!truncated && result.text.includes(TASK_END_SENTINEL)) {
       completion = 'done' // tarea completa
       break
     }
     sessionId = result.sessionId ?? sessionId
     if (attempt === MAX_AUTO_CONTINUES) break
+    // cancelado en el hueco entre dos turnos (el proceso ya había cerrado solo)
+    if (canceledCells.has(opts.id)) {
+      completion = 'canceled'
+      break
+    }
     // ¿el turno se truncó por una herramienta bloqueada/fallida, o sólo le faltó
     // el cierre <task_end>? En el primer caso NO lo enmascaramos: reportamos la
     // causa real al usuario y al modelo (antes ambos casos se veían idénticos).
@@ -1161,7 +1362,10 @@ export async function executeDelegatedTurn(
       : completion === 'rejected'
         ? 'tarea incompleta: el usuario rechazó un permiso que el agente necesitaba ' +
           'para terminar. El texto devuelto es trabajo parcial.'
-        : null
+        : completion === 'canceled'
+          ? 'tarea incompleta: el usuario canceló el turno. El texto devuelto es ' +
+            'trabajo parcial.'
+          : null
 
   return {
     ...result,
@@ -1245,7 +1449,7 @@ function tailByDialog(messages: TranscriptMsg[], limit: number): TranscriptMsg[]
 function runOpencode(args: string[], cwd: string, timeoutMs = 30000): Promise<string> {
   return new Promise((resolve) => {
     let out = ''
-    let child: ChildProcessByStdio<null, Readable, Readable>
+    let child: AgentChild
     try {
       child = spawnAgent('opencode', args, {
         cwd,
@@ -1379,6 +1583,10 @@ export interface SessionSummary {
 export function registerChatHandlers(): void {
   ipcMain.handle('chat:send', async (event, opts: ChatSendOpts) => {
     const wc: WebContents = event.sender
+    // Red de seguridad de la cola: la celda ya tiene un turno lógico corriendo
+    // (puede ser una delegación entrante, que la vista no ve venir). Dos turnos
+    // sobre el mismo directorio se pisan, así que el mensaje vuelve a la cola.
+    if (isCellBusy(opts.id)) return { busy: true }
     recordActivity({
       cellId: opts.id,
       kind: 'chat-turn',
@@ -1390,7 +1598,7 @@ export function registerChatHandlers(): void {
     }
     return executeTurnWithPermissions(opts, (payload) => {
       if (!wc.isDestroyed()) wc.send(`chat:event:${opts.id}`, payload)
-    }).then(() => undefined)
+    }).then(() => ({}))
   })
 
   // Respuesta del usuario al diálogo de permiso de acceso externo (opencode).
@@ -1399,6 +1607,12 @@ export function registerChatHandlers(): void {
     (_event, { requestId, decision }: { requestId: string; decision: PermDecision }) => {
       resolvePermission(requestId, decision)
     }
+  )
+
+  // Mensaje para el turno que ya está corriendo: si el agente admite entrega en
+  // vivo llega al modelo sin esperar al cierre; si no, la vista lo encola.
+  ipcMain.handle('chat:push', (_event, { id, message }: { id: string; message: string }) =>
+    pushToLiveTurn(id, message)
   )
 
   ipcMain.handle('chat:models', (_event, agent: 'claude' | 'opencode') => listChatModels(agent))
@@ -1494,6 +1708,9 @@ export function registerChatHandlers(): void {
     for (const requestId of pendingPermissions.keys()) {
       if (requestId.startsWith(`${id}:`)) resolvePermission(requestId, 'reject')
     }
+    // Se marca aunque no haya proceso vivo: cancelar entre dos turnos de una
+    // delegación (continuación automática) también tiene que frenar la cadena.
+    if (isCellBusy(id)) canceledCells.add(id)
     const child = running.get(id)
     if (child) {
       running.delete(id)

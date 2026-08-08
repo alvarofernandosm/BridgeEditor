@@ -45,10 +45,15 @@ const api = {
     permissionMode: 'plan' | 'edits' | 'flexible' | 'full'
     model?: string | null
     effort?: string | null
-  }): Promise<void> => ipcRenderer.invoke('chat:send', opts),
+    // `busy` = la celda ya tenía un turno corriendo y el mensaje no se envió
+  }): Promise<{ busy?: boolean }> => ipcRenderer.invoke('chat:send', opts),
 
   chatModels: (agent: 'claude' | 'opencode' | 'antigravity'): Promise<string[]> =>
     ipcRenderer.invoke('chat:models', agent),
+
+  /** Entrega un mensaje al turno en curso (claude). false = no hay canal vivo. */
+  chatPush: (id: string, message: string): Promise<boolean> =>
+    ipcRenderer.invoke('chat:push', { id, message }),
 
   chatCancel: (id: string): void => ipcRenderer.send('chat:cancel', { id }),
 

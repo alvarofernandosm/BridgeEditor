@@ -21,7 +21,18 @@ declare global {
     /** Ocupación de la ventana de contexto tras la última llamada al modelo.
      *  contextWindow = null cuando aún no se conoce el tamaño del modelo. */
     | { kind: 'usage'; contextTokens: number; contextWindow: number | null }
-    | { kind: 'done'; sessionId: string | null; meta?: string | null; error?: string | null }
+    | {
+        kind: 'done'
+        sessionId: string | null
+        meta?: string | null
+        error?: string | null
+        /** El turno lo paró el usuario: no cuenta como fallo (ver chat:cancel). */
+        canceled?: boolean
+      }
+    /** Fin real de la actividad de la celda: llega UNA vez por turno lógico,
+     *  después del último `done` (un turno puede reintentar tras un permiso o
+     *  continuarse solo). Es la señal que destraba la cola de mensajes. */
+    | { kind: 'idle' }
     | { kind: 'error'; message: string }
 
   interface Window {
@@ -44,8 +55,11 @@ declare global {
         permissionMode: 'plan' | 'edits' | 'flexible' | 'full'
         model?: string | null
         effort?: string | null
-      }): Promise<void>
+        /** `busy` = la celda ya tenía un turno corriendo y no se envió nada. */
+      }): Promise<{ busy?: boolean }>
       chatModels(agent: 'claude' | 'opencode' | 'antigravity'): Promise<string[]>
+      /** Entrega un mensaje al turno en curso; false = el agente no lo admite. */
+      chatPush(id: string, message: string): Promise<boolean>
       chatCancel(id: string): void
       chatPermission(requestId: string, decision: 'once' | 'all' | 'reject'): void
       chatSessions(
