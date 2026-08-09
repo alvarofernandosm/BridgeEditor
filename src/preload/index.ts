@@ -123,6 +123,21 @@ const api = {
   openCellResponse: (requestId: string, cellId: string | null): void =>
     ipcRenderer.send('cells:open-response', { requestId, cellId }),
 
+  /** Otra celda le manda un texto a ésta (POST /message del puente). */
+  onCellMessage: (
+    cb: (msg: { requestId: string; cellId: string; mode: 'term' | 'chat'; text: string }) => void
+  ): (() => void) => {
+    const listener = (
+      _event: unknown,
+      msg: { requestId: string; cellId: string; mode: 'term' | 'chat'; text: string }
+    ): void => cb(msg)
+    ipcRenderer.on('cells:message', listener)
+    return () => ipcRenderer.removeListener('cells:message', listener)
+  },
+
+  cellMessageResponse: (requestId: string, delivered: boolean): void =>
+    ipcRenderer.send('cells:message-response', { requestId, delivered }),
+
   createPty: (opts: {
     id: string
     cellId?: string

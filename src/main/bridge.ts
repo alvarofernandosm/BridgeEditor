@@ -14,6 +14,13 @@ import { bridgeClientPath } from './bridge-client'
 // consultar el feed de actividad y abrir celdas nuevas. Los destinos en modo
 // chat muestran el turno en vivo; las celdas term de claude se "consultan"
 // con un fork headless de su conversación (--resume de su session id).
+//
+// Delegar no es lo mismo que hablar: /delegate encarga una tarea y espera su
+// respuesta (y por eso sólo va a celdas de chat), mientras que /message le
+// ENTREGA un texto a la celda —el resultado de lo que ella misma delegó, un
+// aviso, un handoff— sin esperar nada. Ese camino sí llega a las terminales:
+// el texto se pega en el TUI como si lo hubiera escrito el usuario, así que
+// un orquestador que trabaja en una terminal también recibe lo que pidió.
 
 interface CellInfo {
   id: string
@@ -29,6 +36,7 @@ interface CellInfo {
   chatModel: string | null
   chatEffort: string | null
   termSessionId: string | null
+  status: 'launcher' | 'running' | 'exited' | 'file'
   busy: boolean
 }
 
@@ -130,7 +138,11 @@ async function delegateToCell(params: {
     return {
       status: 409,
       payload: {
-        error: `la celda ${target.index} no acepta delegación: solo celdas en modo chat, o terminales de Claude con sesión rastreada (consulta). Pide al usuario abrir un chat (launcher → Chat agéntico).`
+        error:
+          `la celda ${target.index} no acepta delegación: solo celdas en modo chat, o terminales ` +
+          `de Claude con sesión rastreada (consulta). Si lo que quieres es entregarle un texto ` +
+          `(el resultado de lo que ella te delegó, un aviso), usa POST /message: eso sí llega a ` +
+          `las terminales.`
       }
     }
   }
@@ -264,6 +276,122 @@ async function delegateToCell(params: {
   }
 }
 
+// Entrega de un mensaje a una celda: el main se lo pasa al renderer, que sabe
+// cómo hacerlo llegar según la vista (pegarlo en el TUI, o meterlo en la cola
+// del chat), y espera el acuse.
+const messageRequests = new Map<string, (delivered: boolean) => void>()
+
+function requestDeliver(spec: {
+  cellId: string
+  mode: 'term' | 'chat'
+  text: string
+}): Promise<boolean> {
+  const wc = getWin()?.webContents
+  if (!wc || wc.isDestroyed()) return Promise.resolve(false)
+  const requestId = randomUUID()
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      messageRequests.delete(requestId)
+      resolve(false)
+    }, 5000)
+    messageRequests.set(requestId, (delivered) => {
+      clearTimeout(timer)
+      messageRequests.delete(requestId)
+      resolve(delivered)
+    })
+    wc.send('cells:message', { requestId, ...spec })
+  })
+}
+
+/** Prefijo del mensaje entregado: dice de quién viene (y de paso evita que un
+ *  texto que empieza por "/" se cuele como slash command de la celda destino).
+ *  El artículo baja a minúscula, no la etiqueta: el título lo escribió alguien. */
+const messageHeader = (fromLabel: string): string =>
+  `[mensaje de ${fromLabel.replace(/^(La|Un) /, (art) => art.toLowerCase())}]`
+
+/**
+ * Entrega un texto a otra celda sin esperar respuesta: el destino lo recibe
+ * como si el usuario se lo hubiera escrito. A diferencia de delegar, aquí lo
+ * que importa es que LLEGUE, así que también vale para terminales.
+ */
+async function messageToCell(params: {
+  targetRef: unknown
+  message: string
+  fromCellId?: unknown
+}): Promise<DelegateOutcome> {
+  const target = findCell(params.targetRef)
+  if (!target) {
+    return {
+      status: 404,
+      payload: {
+        error:
+          `no existe la celda "${String(params.targetRef)}". Usa el número que ve el usuario ` +
+          `(campo "cell" de GET /cells, p. ej. 6) o el id interno exacto (p. ej. "cell-a3f9c2b1").`
+      }
+    }
+  }
+  // Un shell no tiene a quién entregarle nada: lo que se pegue en su prompt se
+  // EJECUTA. El puente sólo le habla a agentes.
+  if (!target.agent || target.agent === 'shell') {
+    return {
+      status: 409,
+      payload: {
+        error: `la celda ${target.index} no tiene un agente al que hablarle (es ${target.agent === 'shell' ? 'una shell' : 'un launcher o un visor'})`
+      }
+    }
+  }
+  if (target.status !== 'running') {
+    return {
+      status: 409,
+      payload: { error: `el agente de la celda ${target.index} ya no está corriendo` }
+    }
+  }
+  const fromCell = typeof params.fromCellId === 'string' ? findCell(params.fromCellId) : undefined
+  if (fromCell?.id === target.id) return { status: 400, payload: { error: 'no puedes escribirte a ti mismo' } }
+  const fromLabel = fromLabelOf(params.fromCellId)
+
+  // Mismas reglas de permiso que delegar (y la misma concesión por par: quien
+  // dejó que esas dos celdas se hablaran, ya dijo que sí a esto).
+  const crossProject = fromCell ? !sameProject(fromCell.cwd, target.cwd) : false
+  const originPerm = fromCell?.perm ?? 'default'
+  const autoApproved = originPerm === 'yolo' || (originPerm === 'flexible' && !crossProject)
+
+  if (!autoApproved) {
+    const warn = crossProject
+      ? `\n\n⚠️ OJO: la celda ${target.index} trabaja en OTRO proyecto.\n` +
+        `Origen:  ${fromCell?.cwd}\nDestino: ${target.cwd}`
+      : ''
+    const pairKey = crossProject
+      ? `${fromLabel}→${target.id}:${fromCell?.cwd}→${target.cwd}`
+      : `${fromLabel}→${target.id}`
+    const ok = await askPermission(
+      fromLabel,
+      pairKey,
+      `${fromLabel} quiere enviarle un mensaje a la celda ${target.index} (${cellName(target)})${crossProject ? ' — ⚠️ otro proyecto' : ''}`,
+      `${target.mode === 'term' ? 'El texto se escribe en su terminal y se envía, como si lo hubieras tecleado tú.' : 'El texto entra en su chat como un mensaje tuyo.'}\n\n` +
+        `${params.message.slice(0, 500)}${params.message.length > 500 ? '…' : ''}${warn}`
+    )
+    if (!ok) return { status: 403, payload: { error: 'el usuario denegó el mensaje' } }
+  }
+
+  const text = `${messageHeader(fromLabel)}\n\n${params.message}`
+  const delivered = await requestDeliver({ cellId: target.id, mode: target.mode, text })
+
+  recordActivity({
+    cellId: target.id,
+    kind: 'delegation',
+    detail: `${delivered ? '✉' : '✗ ✉'} ${fromLabel} → celda ${target.index}: ${params.message.replace(/\s+/g, ' ').slice(0, 100)}`
+  })
+
+  if (!delivered) {
+    return {
+      status: 502,
+      payload: { error: `la celda ${target.index} no recogió el mensaje (¿se cerró o cambió de modo?)` }
+    }
+  }
+  return { status: 200, payload: { ok: true, cell: target.index, type: 'message' } }
+}
+
 // Apertura de celdas desde el puente: el main le pide al renderer crear la
 // celda y espera el id asignado.
 const openRequests = new Map<string, (cellId: string | null) => void>()
@@ -328,6 +456,13 @@ export function registerBridge(getWindow: () => BrowserWindow | null): void {
     openRequests.get(requestId)?.(cellId)
   })
 
+  ipcMain.on(
+    'cells:message-response',
+    (_event, { requestId, delivered }: { requestId: string; delivered: boolean }) => {
+      messageRequests.get(requestId)?.(delivered)
+    }
+  )
+
   // Delegación iniciada desde la UI (marcadores @delegate aprobados con clic):
   // el clic del usuario ES el permiso.
   ipcMain.handle(
@@ -363,7 +498,10 @@ export function registerBridge(getWindow: () => BrowserWindow | null): void {
             model: c.chatModel,
             busy: c.busy || delegating.has(c.id),
             acceptsDelegation: chatOk || consultOk,
-            delegationType: chatOk ? 'chat' : consultOk ? 'consult' : null
+            delegationType: chatOk ? 'chat' : consultOk ? 'consult' : null,
+            // Hablarle a una celda (POST /message) es más simple que delegarle:
+            // basta con que tenga un agente vivo, sea terminal o chat.
+            acceptsMessages: c.agent !== null && c.agent !== 'shell' && c.status === 'running'
           }
         })
       )
@@ -421,6 +559,23 @@ export function registerBridge(getWindow: () => BrowserWindow | null): void {
         message,
         fromCellId: body.from,
         fresh: body.fresh === true
+      })
+      return json(res, outcome.status, outcome.payload)
+    }
+
+    if (req.method === 'POST' && req.url === '/message') {
+      let body: { target?: unknown; message?: unknown; from?: unknown }
+      try {
+        body = JSON.parse(await readBody(req))
+      } catch {
+        return json(res, 400, { error: 'JSON inválido' })
+      }
+      const message = typeof body.message === 'string' ? body.message.trim() : ''
+      if (!message) return json(res, 400, { error: 'falta "message"' })
+      const outcome = await messageToCell({
+        targetRef: body.target,
+        message,
+        fromCellId: body.from
       })
       return json(res, outcome.status, outcome.payload)
     }
@@ -486,7 +641,8 @@ export function registerBridge(getWindow: () => BrowserWindow | null): void {
 
     return json(res, 404, {
       error:
-        'ruta desconocida: GET /cells, GET /activity, GET /result?cell=N, POST /delegate, POST /open-cell'
+        'ruta desconocida: GET /cells, GET /activity, GET /result?cell=N, POST /delegate, ' +
+        'POST /message, POST /open-cell'
     })
   })
 
@@ -570,7 +726,7 @@ function writeDelegationSkill(): void {
 
   const skill = `---
 name: bridge-cells
-description: Orquestar los agentes de otras celdas de BridgeEditor — listar celdas, delegarles tareas, consultar terminales de Claude, ver el feed de actividad y abrir celdas nuevas con otro agente/modelo. Usar cuando el usuario pida delegar, coordinar u orquestar trabajo entre tabs/celdas del editor.
+description: Orquestar los agentes de otras celdas de BridgeEditor — listar celdas, delegarles tareas, enviarles mensajes (también a las terminales), consultar terminales de Claude, ver el feed de actividad y abrir celdas nuevas con otro agente/modelo. Usar cuando el usuario pida delegar, coordinar u orquestar trabajo entre tabs/celdas del editor.
 ---
 
 # Orquestación entre celdas de BridgeEditor
@@ -605,6 +761,10 @@ delegar y para no pisar a alguien que ya está en la misma tarea.
 \`delegationType\` indica cómo acepta trabajo: \`chat\` (delegación completa,
 visible en su celda) o \`consult\` (terminal de Claude: pregunta respondida con
 el contexto de SU conversación, sin modificarla).
+
+\`acceptsMessages\` es otra cosa: con \`true\` puedes ENTREGARLE un texto
+(POST /message, más abajo) aunque no acepte delegación. Vale para cualquier
+celda con un agente vivo, terminal incluida.
 
 ## Delegar o consultar
 
@@ -707,6 +867,42 @@ Por defecto la celda destino CONTINÚA su conversación (recuerda lo anterior).
 Para una tarea independiente que no necesita ese contexto, agrega
 \`${win ? 'fresh = $true' : '"fresh": true'}\` al body: la celda arranca sesión
 nueva (contexto limpio).
+
+## Responderle o avisarle a otra celda (mensajes)
+
+Delegar encarga una tarea y espera su respuesta; \`/message\` sólo ENTREGA un
+texto y vuelve enseguida. Es el camino para lo que no es un encargo:
+
+- devolver el resultado de lo que ESA celda te delegó (aunque sea una terminal),
+- avisar de algo que cambió y la desbloquea,
+- pasarle un handoff, una ruta, una decisión del usuario.
+
+\`\`\`${lang}
+${post(
+  '/message',
+  `target = 1; message = "<texto>"; from = $env:BRIDGE_CELL_ID`,
+  `{\\"target\\": 1, \\"message\\": \\"<texto>\\", \\"from\\": \\"$BRIDGE_CELL_ID\\"}`,
+  'message 1 --file respuesta.txt'
+)}
+\`\`\`
+
+Llega a CUALQUIER celda con un agente vivo (\`acceptsMessages: true\` en
+GET /cells), en chat o en terminal. En una terminal el texto se pega en el TUI
+y se envía como si lo hubiera escrito el usuario: si el agente está a mitad de
+un turno, su propia cola lo recoge. En un chat entra como un mensaje tuyo.
+
+**Si trabajas en una terminal y delegas, esta es tu vía de vuelta**: la celda
+a la que delegaste no puede responderte por \`/delegate\` (tu celda no acepta
+delegaciones), así que dile explícitamente en la tarea que te devuelva el
+resultado con \`message <tu celda>\`.
+
+Responde \`200 {ok: true}\` cuando el texto quedó entregado. NO trae \`.text\`:
+no hay respuesta que esperar — si necesitas una, delega. \`409\` = la celda no
+tiene agente (shell, launcher, visor) o su agente ya terminó; \`403\` = el
+usuario denegó; \`502\` = la celda no recogió el mensaje.
+
+Un mensaje interrumpe menos que una delegación, pero interrumpe: manda uno por
+cosa que la otra celda necesite saber, no un goteo de estados.
 
 ## Abrir una celda nueva con un agente/modelo y asignarle trabajo
 

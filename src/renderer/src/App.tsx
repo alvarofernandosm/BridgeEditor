@@ -211,10 +211,20 @@ export default function App(): JSX.Element {
         chatModel: c.chatModel,
         chatEffort: c.chatEffort,
         termSessionId: c.termSessionId,
+        status: c.status,
         busy: c.activity === 'working'
       }))
     )
   }, [cells])
+
+  // Mensaje que otra celda le manda a ésta (POST /message del puente). Lo
+  // entrega la vista destino, que es la única que sabe cómo: pegarlo en el TUI
+  // o meterlo en la cola del chat. El acuse lo da ella (cellMessageResponse).
+  useEffect(() => {
+    return window.bridge.onCellMessage((msg) => {
+      window.dispatchEvent(new CustomEvent('bridge:cell-message', { detail: msg }))
+    })
+  }, [])
 
   // El puente puede pedir abrir una celda nueva (POST /open-cell).
   useEffect(() => {
