@@ -693,6 +693,36 @@ export function ChatView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [busy, queueHeld, queued])
 
+  // Mensaje que otra celda le entrega a ésta (POST /message del puente): sigue
+  // el mismo camino que escribirlo a mano — turno nuevo si la celda está libre,
+  // entrega en vivo (o cola) si está trabajando. Por ref, para que el listener
+  // —registrado una sola vez— use el estado de este render y no el del primero.
+  const deliverRef = useRef<(text: string) => void>(() => {})
+  deliverRef.current = (text: string): void => {
+    // Un mensaje entrante también destraba la cola frenada por un turno fallido:
+    // llega de fuera precisamente para desatascar a esta celda.
+    setQueueHeld(false)
+    if (runningRef.current) deliverNow(text)
+    else submit(text)
+    if (!activeRef.current) onAttention()
+  }
+
+  useEffect(() => {
+    const onMessage = (e: Event): void => {
+      const detail = (e as CustomEvent).detail as {
+        requestId: string
+        cellId: string
+        mode: 'term' | 'chat'
+        text: string
+      }
+      if (detail.cellId !== cellId || detail.mode !== 'chat') return
+      deliverRef.current(detail.text)
+      window.bridge.cellMessageResponse(detail.requestId, true)
+    }
+    window.addEventListener('bridge:cell-message', onMessage)
+    return () => window.removeEventListener('bridge:cell-message', onMessage)
+  }, [cellId])
+
   /** steer = no esperar: se corta el turno actual y la cola arranca enseguida. */
   const send = (steer = false): void => {
     const message = input.trim()

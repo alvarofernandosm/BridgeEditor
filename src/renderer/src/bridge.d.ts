@@ -91,6 +91,10 @@ declare global {
         }) => void
       ): () => void
       openCellResponse(requestId: string, cellId: string | null): void
+      onCellMessage(
+        cb: (msg: { requestId: string; cellId: string; mode: 'term' | 'chat'; text: string }) => void
+      ): () => void
+      cellMessageResponse(requestId: string, delivered: boolean): void
       createPty(opts: {
         id: string
         cellId?: string

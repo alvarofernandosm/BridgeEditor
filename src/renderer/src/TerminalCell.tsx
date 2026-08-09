@@ -352,6 +352,14 @@ function TerminalView({
   const activeRef = useRef(active)
   activeRef.current = active
 
+  // Cada rama avisa en pantalla: antes, copiar sin selección o un portapapeles
+  // vacío no hacían nada y no había forma de distinguirlo de "el atajo no llegó".
+  const showFlash = useCallback((msg: string): void => {
+    setFlash(msg)
+    window.clearTimeout(flashTimerRef.current)
+    flashTimerRef.current = window.setTimeout(() => setFlash(null), 1800)
+  }, [])
+
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
@@ -384,14 +392,6 @@ function TerminalView({
         brightWhite: '#f0f6fc'
       }
     })
-
-    // Cada rama avisa en pantalla: antes, copiar sin selección o un portapapeles
-    // vacío no hacían nada y no había forma de distinguirlo de "el atajo no llegó".
-    const showFlash = (msg: string): void => {
-      setFlash(msg)
-      window.clearTimeout(flashTimerRef.current)
-      flashTimerRef.current = window.setTimeout(() => setFlash(null), 1800)
-    }
 
     const alPortapapeles = (texto: string, origen: string): void => {
       try {
@@ -735,6 +735,34 @@ function TerminalView({
     window.addEventListener('bridge:insert-path', onInsert)
     return () => window.removeEventListener('bridge:insert-path', onInsert)
   }, [cellId])
+
+  // Mensaje de otra celda (POST /message): entra por term.paste, que respeta el
+  // bracketed paste del TUI —así un texto de varias líneas llega entero en vez
+  // de ejecutarse línea a línea—, y se envía con un Enter aparte. El Enter va
+  // en otro tick porque el TUI necesita procesar el bloque pegado antes.
+  useEffect(() => {
+    const onMessage = (e: Event): void => {
+      const detail = (e as CustomEvent).detail as {
+        requestId: string
+        cellId: string
+        mode: 'term' | 'chat'
+        text: string
+      }
+      if (detail.cellId !== cellId || detail.mode !== 'term') return
+      const term = termRef.current
+      if (!term) {
+        window.bridge.cellMessageResponse(detail.requestId, false)
+        return
+      }
+      term.paste(detail.text)
+      window.setTimeout(() => window.bridge.write(ptyId, '\r'), 80)
+      showFlash('✉ mensaje de otra celda')
+      if (!activeRef.current) cbRef.current.onAttention()
+      window.bridge.cellMessageResponse(detail.requestId, true)
+    }
+    window.addEventListener('bridge:cell-message', onMessage)
+    return () => window.removeEventListener('bridge:cell-message', onMessage)
+  }, [cellId, ptyId, showFlash])
 
   useEffect(() => {
     if (active) termRef.current?.focus()

@@ -90,6 +90,7 @@ def main(argv):
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__ + "\\n\\nComandos: cells | activity | result <celda> | "
               "delegate <celda> (--text T | --file F) [--fresh] [--out ARCHIVO] | "
+              "message <celda> (--text T | --file F) | "
               "open-cell <agente> [--cwd D] [--model M] [--effort E] (--text T | --file F)")
         return 0
     cmd, args = argv[0], argv[1:]
@@ -111,6 +112,14 @@ def main(argv):
         if "--fresh" in args:
             payload["fresh"] = True
         status, out = call("POST", "/delegate", payload)
+    elif cmd == "message":
+        if not args:
+            die("uso: message <celda> (--text … | --file …)")
+        payload = {"target": args[0], "message": body_from(args)}
+        if SELF:
+            payload["from"] = SELF
+        # Entregar es inmediato: no hay turno que esperar del otro lado.
+        status, out = call("POST", "/message", payload, timeout=60)
     elif cmd == "open-cell":
         if not args:
             die("uso: open-cell <claude|opencode|antigravity> [opciones]")

@@ -280,7 +280,8 @@ orquestando a OpenCode con otros modelos en las celdas 2 y 3.
 - El turno delegado **se ve en vivo en el chat de la celda destino** con la
   etiqueta 📨 de quién lo envió; la respuesta vuelve al orquestador como JSON.
 - Solo las celdas en **modo chat** aceptan delegación (el TUI no tiene salida
-  estructurada); las ocupadas devuelven 409.
+  estructurada); las ocupadas devuelven 409. Para *hablarle* a una terminal
+  está `POST /message` (más abajo).
 
 Pruébalo: abre un chat de Claude en la celda 1 y chats de OpenCode en la 2 y
 la 3, y dile a Claude: *"lista las celdas disponibles y delega X a la celda 2
@@ -294,6 +295,14 @@ Además del `/delegate` básico, el puente ofrece:
   arma su propio equipo sobre la marcha. La skill le indica que si no le
   especificaste agente/modelo/effort te **pregunte primero** en vez de abrir
   un clon de sí mismo — la gracia es la diversidad de modelos.
+- **`POST /message`** — entregarle un texto a otra celda sin esperar respuesta:
+  el resultado de lo que ella te delegó, un aviso que la desbloquea, un
+  handoff. A diferencia de `/delegate`, llega a **cualquier celda con un agente
+  vivo, terminal incluida**: en un TUI el texto se pega (bracketed paste, así
+  que el multilínea llega entero) y se envía como si lo hubieras tecleado tú —
+  si el agente está a mitad de un turno, lo recoge su propia cola. Con esto una
+  celda que orquesta desde una terminal **sí recibe de vuelta** lo que delegó,
+  que antes chocaba contra un 409. Mismas reglas de permiso que delegar.
 - **`GET /activity`** — feed de lo ocurrido en las demás celdas (archivos
   guardados, turnos de chat, delegaciones), para que un agente se ponga en
   contexto por demanda.
