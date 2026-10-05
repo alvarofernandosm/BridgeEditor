@@ -412,8 +412,22 @@ npm run dev
 ```bash
 npm run dist:linux   # AppImage + deb
 npm run dist:mac     # dmg (correr en macOS)
-npm run dist:win     # instalador NSIS (correr en Windows)
+npm run dist:win     # instalador NSIS + portable (correr en Windows)
 ```
+
+Los artefactos quedan en `release/`. En Windows salen dos: `BridgeEditor Setup
+<v>.exe` (instalador, permite elegir carpeta) y `BridgeEditor <v>.exe`
+(portable). Ninguno va firmado si no hay certificado, así que SmartScreen
+muestra el aviso de editor desconocido — *Más información → Ejecutar de todas
+formas*.
+
+> **Windows no necesita Visual Studio.** `dist:win` pasa `-c.npmRebuild=false`
+> a propósito: `node-pty` es un addon N-API y trae binarios precompilados para
+> `win32-x64`/`win32-arm64`, que Electron carga tal cual. Sin ese flag,
+> `@electron/rebuild` intenta compilar desde fuente y falla con *"Could not
+> find any Visual Studio installation to use"* en una máquina sin VS. En Linux
+> sí hace falta compilar (`prebuilds/` no trae `linux-x64`), por eso
+> `electron-builder.yml` conserva `npmRebuild: true` como default.
 
 ## Stack
 

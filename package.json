@@ -16,7 +16,7 @@
     "typecheck": "tsc --noEmit",
     "postinstall": "electron-builder install-app-deps",
     "dist:linux": "electron-vite build && electron-builder --linux",
-    "dist:win": "electron-vite build && electron-builder --win",
+    "dist:win": "electron-vite build && electron-builder --win --publish never -c.npmRebuild=false",
     "dist:mac": "electron-vite build && electron-builder --mac"
   },
   "dependencies": {
